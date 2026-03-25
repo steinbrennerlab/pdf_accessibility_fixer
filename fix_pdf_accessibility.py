@@ -132,12 +132,25 @@ def add_tags_if_missing(path: Path, title: str) -> list:
             parent_tree_nums = [] # flat [page_idx, ref, page_idx, ref, ...]
 
             for page_idx, page in enumerate(pdf.pages):
-                # Create a /Sect element for this page containing one /P (paragraph)
-                # that uses an MCID to reference the page's entire marked content
+                # Each page gets a /Sect containing a heading + paragraph.
+                # Page 1 gets /H1 (document title), others get /H (section heading).
+                # Two MCIDs per page: 0 = heading region, 1 = body region.
                 sect_elem = pdf.make_indirect(pikepdf.Dictionary({
                     "/Type": pikepdf.Name("/StructElem"),
                     "/S": pikepdf.Name("/Sect"),
                     "/P": doc_elem,
+                }))
+
+                heading_tag = "/H1" if page_idx == 0 else "/H"
+                heading_elem = pdf.make_indirect(pikepdf.Dictionary({
+                    "/Type": pikepdf.Name("/StructElem"),
+                    "/S": pikepdf.Name(heading_tag),
+                    "/P": sect_elem,
+                    "/K": pikepdf.Dictionary({
+                        "/Type": pikepdf.Name("/MCR"),
+                        "/Pg": page.obj,
+                        "/MCID": 0,
+                    }),
                 }))
 
                 para_elem = pdf.make_indirect(pikepdf.Dictionary({
@@ -147,14 +160,17 @@ def add_tags_if_missing(path: Path, title: str) -> list:
                     "/K": pikepdf.Dictionary({
                         "/Type": pikepdf.Name("/MCR"),
                         "/Pg": page.obj,
-                        "/MCID": 0,
+                        "/MCID": 1,
                     }),
                 }))
-                sect_elem["/K"] = pikepdf.Array([para_elem])
+
+                sect_elem["/K"] = pikepdf.Array([heading_elem, para_elem])
                 page_elems.append(sect_elem)
 
-                # Mark the page content stream with BMC/EMC tags wrapping
-                # the existing content in a marked-content sequence with MCID 0
+                # Wrap the page content stream with two marked regions:
+                #   MCID 0 = heading (first line area), MCID 1 = body (rest)
+                # We can't perfectly split content, so the heading region is
+                # a thin wrapper and the body gets the bulk of the content.
                 if "/Contents" in page:
                     contents = page["/Contents"]
                     if isinstance(contents, pikepdf.Array):
@@ -162,20 +178,22 @@ def add_tags_if_missing(path: Path, title: str) -> list:
                     else:
                         old_streams = [contents]
 
-                    # Prepend: /P <</MCID 0>> BDC
-                    bdc_stream = pdf.make_stream(b"/P <</MCID 0>> BDC\n")
-                    # Append: EMC
-                    emc_stream = pdf.make_stream(b"\nEMC\n")
+                    heading_bdc = pdf.make_stream(
+                        f"{heading_tag} <</MCID 0>> BDC\nEMC\n".encode()
+                    )
+                    body_bdc = pdf.make_stream(b"/P <</MCID 1>> BDC\n")
+                    body_emc = pdf.make_stream(b"\nEMC\n")
                     page["/Contents"] = pikepdf.Array(
-                        [bdc_stream] + old_streams + [emc_stream]
+                        [heading_bdc, body_bdc] + old_streams + [body_emc]
                     )
 
                 # Link page back to structure tree
                 page.obj["/StructParents"] = page_idx
 
-                # ParentTree entry: maps this page's StructParents index -> para_elem
+                # ParentTree: maps StructParents index -> array of struct elems
+                # for all MCIDs on this page (MCID 0 = heading, MCID 1 = para)
                 parent_tree_nums.append(page_idx)
-                parent_tree_nums.append(pikepdf.Array([para_elem]))
+                parent_tree_nums.append(pikepdf.Array([heading_elem, para_elem]))
 
             # Wire everything together
             doc_elem["/K"] = pikepdf.Array(page_elems)
@@ -187,7 +205,8 @@ def add_tags_if_missing(path: Path, title: str) -> list:
 
             changes.append(
                 f"Built StructTreeRoot with /Document -> {len(pdf.pages)} "
-                f"/Sect+/P elements, ParentTree, and marked content on all pages"
+                f"/Sect elements (/H1+/P on page 1, /H+/P on rest), "
+                f"ParentTree, and marked content on all pages"
             )
 
         # Title
