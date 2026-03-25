@@ -469,7 +469,8 @@ class App:
         self.btn_scan = ttk.Button(btn_frame, text="Scan Folder", command=self.scan)
         self.btn_scan.pack(side=tk.LEFT, padx=(0, 4))
 
-        self.btn_fix = ttk.Button(btn_frame, text="Fix All", command=self._start_fix_all)
+        self.btn_fix = ttk.Button(btn_frame, text="Fix Selected",
+                                   command=self._start_fix_selected)
         self.btn_fix.pack(side=tk.LEFT, padx=(0, 4))
 
         self.btn_log = ttk.Button(btn_frame, text="Open Log", command=self._open_log)
@@ -707,29 +708,35 @@ class App:
             parts.append("Headings")
         return " ".join(parts) or "None"
 
-    # -- Fix all ------------------------------------------------------------
+    # -- Fix selected -------------------------------------------------------
 
-    def _start_fix_all(self):
+    def _start_fix_selected(self):
         if self._processing:
             return
 
-        to_fix = [
-            (fname, d) for fname, d in self._file_data.items()
-            if d["status"] == S_NEEDS_FIX
-        ]
-        if not to_fix:
+        sel = self.tree.selection()
+        if not sel:
             return
+        iid = sel[0]
+        fname = self.tree.item(iid, "text")
+        if not fname or fname not in self._file_data:
+            return
+        data = self._file_data[fname]
+        if data["status"] not in (S_NEEDS_FIX,):
+            return
+
+        to_fix = [(fname, data)]
 
         self._processing = True
         self.btn_fix.config(state=tk.DISABLED)
         self.btn_scan.config(state=tk.DISABLED)
-        self.progress["maximum"] = len(to_fix)
+        self.progress["maximum"] = 1
         self.progress["value"] = 0
 
         strategy = self.strategy_var.get()
 
         log_section("FIX SESSION STARTED")
-        log(f"Files to process: {len(to_fix)}")
+        log(f"File: {fname}")
         log(f"Heading strategy: {strategy}")
 
         thread = threading.Thread(
