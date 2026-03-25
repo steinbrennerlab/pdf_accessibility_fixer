@@ -48,6 +48,19 @@ def derive_title(filename: str) -> str:
     return Path(filename).stem.replace("_", " ")
 
 
+def _struct_tree_is_empty(root) -> bool:
+    """Check if a StructTreeRoot exists but has no real content."""
+    st = root.get("/StructTreeRoot")
+    if st is None:
+        return True
+    k = st.get("/K")
+    if k is None:
+        return True
+    if isinstance(k, pikepdf.Array) and len(k) == 0:
+        return True
+    return False
+
+
 def inspect_pdf(path: Path) -> dict:
     with pikepdf.open(path) as pdf:
         root = pdf.Root
@@ -80,7 +93,7 @@ def inspect_pdf(path: Path) -> dict:
 
         return {
             "has_mark_info": "/MarkInfo" in root,
-            "has_struct_tree": "/StructTreeRoot" in root,
+            "has_struct_tree": not _struct_tree_is_empty(root),
             "has_good_title": is_good_title,
             "current_title": title_raw,
             "has_text": has_text,
@@ -89,25 +102,95 @@ def inspect_pdf(path: Path) -> dict:
 
 
 def add_tags_if_missing(path: Path, title: str) -> list:
-    """Add MarkInfo, StructTreeRoot, and title. Returns list of changes made."""
+    """Add MarkInfo, real per-page StructTreeRoot, and title. Returns changes."""
     changes = []
     with pikepdf.open(path, allow_overwriting_input=True) as pdf:
         root = pdf.Root
 
+        # MarkInfo
         if "/MarkInfo" not in root:
             root["/MarkInfo"] = pikepdf.Dictionary({"/Marked": True})
             changes.append("Added /MarkInfo{Marked:true}")
 
-        if "/StructTreeRoot" not in root:
-            struct_root = pikepdf.Dictionary({
+        # Build a real structure tree if missing or empty
+        if _struct_tree_is_empty(root):
+            # Create the StructTreeRoot first (we'll fill /K and /ParentTree below)
+            struct_root = pdf.make_indirect(pikepdf.Dictionary({
                 "/Type": pikepdf.Name("/StructTreeRoot"),
-                "/K": pikepdf.Array([]),
-                "/ParentTree": pikepdf.Dictionary({"/Nums": pikepdf.Array([])}),
-                "/ParentTreeNextKey": 0,
-            })
-            root["/StructTreeRoot"] = pdf.make_indirect(struct_root)
-            changes.append("Added /StructTreeRoot")
+            }))
+            root["/StructTreeRoot"] = struct_root
 
+            # Document-level element — the single child of StructTreeRoot
+            doc_elem = pdf.make_indirect(pikepdf.Dictionary({
+                "/Type": pikepdf.Name("/StructElem"),
+                "/S": pikepdf.Name("/Document"),
+                "/P": struct_root,
+                "/K": pikepdf.Array([]),
+            }))
+
+            page_elems = []       # one /Sect per page, children of /Document
+            parent_tree_nums = [] # flat [page_idx, ref, page_idx, ref, ...]
+
+            for page_idx, page in enumerate(pdf.pages):
+                # Create a /Sect element for this page containing one /P (paragraph)
+                # that uses an MCID to reference the page's entire marked content
+                sect_elem = pdf.make_indirect(pikepdf.Dictionary({
+                    "/Type": pikepdf.Name("/StructElem"),
+                    "/S": pikepdf.Name("/Sect"),
+                    "/P": doc_elem,
+                }))
+
+                para_elem = pdf.make_indirect(pikepdf.Dictionary({
+                    "/Type": pikepdf.Name("/StructElem"),
+                    "/S": pikepdf.Name("/P"),
+                    "/P": sect_elem,
+                    "/K": pikepdf.Dictionary({
+                        "/Type": pikepdf.Name("/MCR"),
+                        "/Pg": page.obj,
+                        "/MCID": 0,
+                    }),
+                }))
+                sect_elem["/K"] = pikepdf.Array([para_elem])
+                page_elems.append(sect_elem)
+
+                # Mark the page content stream with BMC/EMC tags wrapping
+                # the existing content in a marked-content sequence with MCID 0
+                if "/Contents" in page:
+                    contents = page["/Contents"]
+                    if isinstance(contents, pikepdf.Array):
+                        old_streams = list(contents)
+                    else:
+                        old_streams = [contents]
+
+                    # Prepend: /P <</MCID 0>> BDC
+                    bdc_stream = pdf.make_stream(b"/P <</MCID 0>> BDC\n")
+                    # Append: EMC
+                    emc_stream = pdf.make_stream(b"\nEMC\n")
+                    page["/Contents"] = pikepdf.Array(
+                        [bdc_stream] + old_streams + [emc_stream]
+                    )
+
+                # Link page back to structure tree
+                page.obj["/StructParents"] = page_idx
+
+                # ParentTree entry: maps this page's StructParents index -> para_elem
+                parent_tree_nums.append(page_idx)
+                parent_tree_nums.append(pikepdf.Array([para_elem]))
+
+            # Wire everything together
+            doc_elem["/K"] = pikepdf.Array(page_elems)
+            struct_root["/K"] = pikepdf.Array([doc_elem])
+            struct_root["/ParentTree"] = pdf.make_indirect(pikepdf.Dictionary({
+                "/Nums": pikepdf.Array(parent_tree_nums),
+            }))
+            struct_root["/ParentTreeNextKey"] = len(pdf.pages)
+
+            changes.append(
+                f"Built StructTreeRoot with /Document -> {len(pdf.pages)} "
+                f"/Sect+/P elements, ParentTree, and marked content on all pages"
+            )
+
+        # Title
         with pdf.open_metadata() as meta:
             meta["dc:title"] = title
         pdf.docinfo["/Title"] = title
