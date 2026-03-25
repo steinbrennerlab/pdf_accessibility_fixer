@@ -61,6 +61,45 @@ def _struct_tree_is_empty(root) -> bool:
     return False
 
 
+def _struct_tree_has_headings(root) -> bool:
+    """Check if the structure tree contains any heading elements."""
+    st = root.get("/StructTreeRoot")
+    if st is None:
+        return False
+    heading_names = {"/H", "/H1", "/H2", "/H3", "/H4", "/H5", "/H6"}
+    try:
+        k = st.get("/K")
+        if k is None:
+            return False
+        # Walk: StructTreeRoot -> /Document -> /Sect -> children
+        docs = k if isinstance(k, pikepdf.Array) else [k]
+        for doc in docs:
+            if not isinstance(doc, pikepdf.Dictionary):
+                continue
+            sects = doc.get("/K")
+            if sects is None:
+                continue
+            sects = sects if isinstance(sects, pikepdf.Array) else [sects]
+            for sect in sects:
+                if not isinstance(sect, pikepdf.Dictionary):
+                    continue
+                # Check sect itself
+                if str(sect.get("/S", "")) in heading_names:
+                    return True
+                # Check sect's children
+                children = sect.get("/K")
+                if children is None:
+                    continue
+                children = children if isinstance(children, pikepdf.Array) else [children]
+                for child in children:
+                    if isinstance(child, pikepdf.Dictionary):
+                        if str(child.get("/S", "")) in heading_names:
+                            return True
+    except Exception:
+        pass
+    return False
+
+
 def inspect_pdf(path: Path) -> dict:
     with pikepdf.open(path) as pdf:
         root = pdf.Root
@@ -94,6 +133,7 @@ def inspect_pdf(path: Path) -> dict:
         return {
             "has_mark_info": "/MarkInfo" in root,
             "has_struct_tree": not _struct_tree_is_empty(root),
+            "has_headings": _struct_tree_has_headings(root),
             "has_good_title": is_good_title,
             "current_title": title_raw,
             "has_text": has_text,
@@ -112,8 +152,9 @@ def add_tags_if_missing(path: Path, title: str) -> list:
             root["/MarkInfo"] = pikepdf.Dictionary({"/Marked": True})
             changes.append("Added /MarkInfo{Marked:true}")
 
-        # Build a real structure tree if missing or empty
-        if _struct_tree_is_empty(root):
+        # Build a real structure tree if missing, empty, or lacking headings
+        needs_struct = _struct_tree_is_empty(root) or not _struct_tree_has_headings(root)
+        if needs_struct:
             # Create the StructTreeRoot first (we'll fill /K and /ParentTree below)
             struct_root = pdf.make_indirect(pikepdf.Dictionary({
                 "/Type": pikepdf.Name("/StructTreeRoot"),
@@ -248,6 +289,8 @@ def verify_output(path: Path, expected_title: str) -> list:
         errors.append("Missing /MarkInfo")
     if not info["has_struct_tree"]:
         errors.append("Missing /StructTreeRoot")
+    if not info["has_headings"]:
+        errors.append("Missing headings in structure tree")
     if not info["has_text"]:
         errors.append("No text content (OCR may have failed)")
     with pikepdf.open(path) as pdf:
@@ -383,6 +426,8 @@ class App:
                 issues.append("no MarkInfo")
             if not info["has_struct_tree"]:
                 issues.append("no StructTreeRoot")
+            elif not info["has_headings"]:
+                issues.append("no headings in structure tree")
             if not info["has_good_title"]:
                 issues.append("bad/missing title")
             if not info["has_text"]:
@@ -392,7 +437,9 @@ class App:
             if info["has_mark_info"]:
                 tags_str += "MarkInfo "
             if info["has_struct_tree"]:
-                tags_str += "StructTree"
+                tags_str += "StructTree "
+            if info["has_headings"]:
+                tags_str += "Headings"
             if not tags_str:
                 tags_str = "None"
 
@@ -402,6 +449,7 @@ class App:
             log(f"    Has text:       {info['has_text']}")
             log(f"    MarkInfo:       {info['has_mark_info']}")
             log(f"    StructTreeRoot: {info['has_struct_tree']}")
+            log(f"    Headings:       {info['has_headings']}")
             log(f"    Title:          {info['current_title']!r}")
             log(f"    Good title:     {info['has_good_title']}")
 
@@ -426,7 +474,9 @@ class App:
                     if out_info["has_mark_info"]:
                         tags_str += "MarkInfo "
                     if out_info["has_struct_tree"]:
-                        tags_str += "StructTree"
+                        tags_str += "StructTree "
+                    if out_info["has_headings"]:
+                        tags_str += "Headings"
                     status = S_FIXED
                     detail = "Previously fixed (in updated/)"
                     tag = "fixed"
@@ -531,7 +581,9 @@ class App:
                     if out_info["has_mark_info"]:
                         tags_str += "MarkInfo "
                     if out_info["has_struct_tree"]:
-                        tags_str += "StructTree"
+                        tags_str += "StructTree "
+                    if out_info["has_headings"]:
+                        tags_str += "Headings"
 
                     detail = f"Fixed in {elapsed:.1f}s — {mode}"
                     log(f"    VERIFY OK: all checks pass")
