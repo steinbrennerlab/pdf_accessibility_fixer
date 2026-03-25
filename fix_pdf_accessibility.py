@@ -306,6 +306,30 @@ class App:
                     log(f"    KNOWN_GOOD: {fname} — already compliant, skipped")
                 else:
                     log(f"    STATUS: Already compliant — no fixes needed")
+            elif (OUTPUT_DIR / fname).exists():
+                # A fixed version exists — verify it and show as previously fixed
+                output_path = OUTPUT_DIR / fname
+                title = derive_title(fname)
+                errors = verify_output(output_path, title)
+                if not errors:
+                    out_info = inspect_pdf(output_path)
+                    info = out_info  # display the fixed version's info
+                    tags_str = ""
+                    if out_info["has_mark_info"]:
+                        tags_str += "MarkInfo "
+                    if out_info["has_struct_tree"]:
+                        tags_str += "StructTree"
+                    status = S_FIXED
+                    detail = "Previously fixed (in updated/)"
+                    tag = "fixed"
+                    n_compliant += 1
+                    log(f"    STATUS: Previously fixed — verified output in updated/")
+                else:
+                    status = S_NEEDS_FIX
+                    detail = "; ".join(issues) + " (prior fix failed verification)"
+                    tag = "needs_fix"
+                    n_needs_fix += 1
+                    log(f"    STATUS: Needs fix — prior output failed: {errors}")
             else:
                 status = S_NEEDS_FIX
                 detail = "; ".join(issues)
