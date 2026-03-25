@@ -1,5 +1,6 @@
-"""PDF Accessibility Fixer — tkinter GUI with detailed logging."""
+"""PDF Accessibility Fixer — tkinter GUI with smart heading detection."""
 
+from collections import Counter
 from pathlib import Path
 from datetime import datetime
 import os
@@ -13,6 +14,8 @@ from tkinter import ttk
 
 import pikepdf
 import ocrmypdf
+from pdfminer.high_level import extract_pages
+from pdfminer.layout import LAParams, LTTextBox, LTTextLine, LTChar
 
 
 BASE_DIR = Path(__file__).parent
@@ -20,28 +23,153 @@ OUTPUT_DIR = BASE_DIR / "updated"
 LOG_FILE = BASE_DIR / "accessibility_log.txt"
 KNOWN_GOOD = {"Wk1_Janeway_Ch1_Sec1-5.pdf"}
 
+# Heading detection strategies
+STRATEGY_AUTO = "Auto (font size)"
+STRATEGY_FIRST_LINE = "First line = H1"
+STRATEGY_BOLD = "Bold text = headings"
+STRATEGIES = [STRATEGY_AUTO, STRATEGY_FIRST_LINE, STRATEGY_BOLD]
+
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
 def log(msg: str) -> None:
-    """Append a timestamped line to the log file."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{ts}]  {msg}\n"
     with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(line)
+        f.write(f"[{ts}]  {msg}\n")
 
 
 def log_section(title: str) -> None:
-    """Write a section header to the log."""
     log(f"{'=' * 60}")
     log(f"  {title}")
     log(f"{'=' * 60}")
 
 
 # ---------------------------------------------------------------------------
-# PDF helpers (unchanged from CLI version)
+# Heading detection
+# ---------------------------------------------------------------------------
+
+def _extract_text_lines(path: Path, page_num: int) -> list[dict]:
+    """Extract text lines with font info from a single page using pdfminer."""
+    lines = []
+    try:
+        for pg_idx, page_layout in enumerate(extract_pages(
+            str(path), page_numbers=[page_num], laparams=LAParams()
+        )):
+            for elem in page_layout:
+                if isinstance(elem, LTTextBox):
+                    for line in elem:
+                        if not isinstance(line, LTTextLine):
+                            continue
+                        text = line.get_text().strip()
+                        if not text or len(text) < 2:
+                            continue
+                        font_name = font_size = None
+                        for ch in line:
+                            if isinstance(ch, LTChar):
+                                font_name = ch.fontname
+                                font_size = round(ch.size, 1)
+                                break
+                        if font_size is None or font_size < 5:
+                            continue  # skip tiny/rotated text
+                        lines.append({
+                            "text": text,
+                            "font_name": font_name or "",
+                            "font_size": font_size,
+                            "y": round(line.y0),
+                            "is_bold": font_name and ("Bold" in font_name
+                                                       or "bold" in font_name),
+                        })
+    except Exception:
+        pass
+    return lines
+
+
+def detect_headings(path: Path, strategy: str = STRATEGY_AUTO) -> list[dict]:
+    """Detect headings across all pages. Returns list of heading dicts."""
+    try:
+        # Get page count
+        with pikepdf.open(path) as pdf:
+            n_pages = len(pdf.pages)
+    except Exception:
+        return []
+
+    all_headings = []
+
+    if strategy == STRATEGY_AUTO:
+        # First pass: collect all font sizes across all pages to find body size
+        all_sizes = []
+        page_lines = {}
+        for pg in range(n_pages):
+            lines = _extract_text_lines(path, pg)
+            page_lines[pg] = lines
+            all_sizes.extend(ln["font_size"] for ln in lines)
+
+        if not all_sizes:
+            return []
+
+        # Body font = most common size
+        size_counts = Counter(all_sizes)
+        body_size = size_counts.most_common(1)[0][0]
+
+        # Heading sizes = sizes significantly larger than body (>= 1.2x)
+        heading_sizes = sorted(
+            set(s for s in all_sizes if s >= body_size * 1.2),
+            reverse=True,
+        )
+        # Map sizes to levels: largest = H1, next = H2, etc.
+        # Cap at 3 levels for academic papers (H1=title, H2=subtitle, H3=section)
+        size_to_level = {}
+        for i, sz in enumerate(heading_sizes):
+            size_to_level[sz] = min(i + 1, 3)
+
+        for pg in range(n_pages):
+            for ln in page_lines.get(pg, []):
+                if ln["font_size"] in size_to_level:
+                    all_headings.append({
+                        "page": pg,
+                        "level": size_to_level[ln["font_size"]],
+                        "text": ln["text"],
+                        "font_size": ln["font_size"],
+                        "font_name": ln["font_name"],
+                    })
+
+    elif strategy == STRATEGY_FIRST_LINE:
+        for pg in range(n_pages):
+            lines = _extract_text_lines(path, pg)
+            if lines:
+                # Topmost line (highest y)
+                top = max(lines, key=lambda l: l["y"])
+                all_headings.append({
+                    "page": pg,
+                    "level": 1 if pg == 0 else 2,
+                    "text": top["text"],
+                    "font_size": top["font_size"],
+                    "font_name": top["font_name"],
+                })
+
+    elif strategy == STRATEGY_BOLD:
+        for pg in range(n_pages):
+            lines = _extract_text_lines(path, pg)
+            for ln in lines:
+                if ln["is_bold"]:
+                    all_headings.append({
+                        "page": pg,
+                        "level": 2,
+                        "text": ln["text"],
+                        "font_size": ln["font_size"],
+                        "font_name": ln["font_name"],
+                    })
+        # Promote first heading to H1
+        if all_headings:
+            all_headings[0]["level"] = 1
+
+    return all_headings
+
+
+# ---------------------------------------------------------------------------
+# PDF helpers
 # ---------------------------------------------------------------------------
 
 def derive_title(filename: str) -> str:
@@ -49,7 +177,6 @@ def derive_title(filename: str) -> str:
 
 
 def _struct_tree_is_empty(root) -> bool:
-    """Check if a StructTreeRoot exists but has no real content."""
     st = root.get("/StructTreeRoot")
     if st is None:
         return True
@@ -61,8 +188,8 @@ def _struct_tree_is_empty(root) -> bool:
     return False
 
 
-def _struct_tree_has_headings(root) -> bool:
-    """Check if the structure tree contains any heading elements."""
+def _has_heading_with_text(root) -> bool:
+    """Check if structure tree has heading elements with /ActualText."""
     st = root.get("/StructTreeRoot")
     if st is None:
         return False
@@ -71,7 +198,6 @@ def _struct_tree_has_headings(root) -> bool:
         k = st.get("/K")
         if k is None:
             return False
-        # Walk: StructTreeRoot -> /Document -> /Sect -> children
         docs = k if isinstance(k, pikepdf.Array) else [k]
         for doc in docs:
             if not isinstance(doc, pikepdf.Dictionary):
@@ -83,17 +209,14 @@ def _struct_tree_has_headings(root) -> bool:
             for sect in sects:
                 if not isinstance(sect, pikepdf.Dictionary):
                     continue
-                # Check sect itself
-                if str(sect.get("/S", "")) in heading_names:
-                    return True
-                # Check sect's children
                 children = sect.get("/K")
                 if children is None:
                     continue
                 children = children if isinstance(children, pikepdf.Array) else [children]
                 for child in children:
                     if isinstance(child, pikepdf.Dictionary):
-                        if str(child.get("/S", "")) in heading_names:
+                        s = str(child.get("/S", ""))
+                        if s in heading_names and "/ActualText" in child:
                             return True
     except Exception:
         pass
@@ -133,7 +256,7 @@ def inspect_pdf(path: Path) -> dict:
         return {
             "has_mark_info": "/MarkInfo" in root,
             "has_struct_tree": not _struct_tree_is_empty(root),
-            "has_headings": _struct_tree_has_headings(root),
+            "has_headings": _has_heading_with_text(root),
             "has_good_title": is_good_title,
             "current_title": title_raw,
             "has_text": has_text,
@@ -141,27 +264,32 @@ def inspect_pdf(path: Path) -> dict:
         }
 
 
-def add_tags_if_missing(path: Path, title: str) -> list:
-    """Add MarkInfo, real per-page StructTreeRoot, and title. Returns changes."""
+def add_tags_if_missing(path: Path, title: str,
+                        strategy: str = STRATEGY_AUTO) -> list:
+    """Add MarkInfo, structure tree with real headings, and title."""
     changes = []
     with pikepdf.open(path, allow_overwriting_input=True) as pdf:
         root = pdf.Root
 
-        # MarkInfo
         if "/MarkInfo" not in root:
             root["/MarkInfo"] = pikepdf.Dictionary({"/Marked": True})
             changes.append("Added /MarkInfo{Marked:true}")
 
-        # Build a real structure tree if missing, empty, or lacking headings
-        needs_struct = _struct_tree_is_empty(root) or not _struct_tree_has_headings(root)
+        needs_struct = (_struct_tree_is_empty(root)
+                        or not _has_heading_with_text(root))
         if needs_struct:
-            # Create the StructTreeRoot first (we'll fill /K and /ParentTree below)
+            # Detect headings from the PDF content
+            headings = detect_headings(path, strategy)
+            # Group by page
+            headings_by_page: dict[int, list] = {}
+            for h in headings:
+                headings_by_page.setdefault(h["page"], []).append(h)
+
             struct_root = pdf.make_indirect(pikepdf.Dictionary({
                 "/Type": pikepdf.Name("/StructTreeRoot"),
             }))
             root["/StructTreeRoot"] = struct_root
 
-            # Document-level element — the single child of StructTreeRoot
             doc_elem = pdf.make_indirect(pikepdf.Dictionary({
                 "/Type": pikepdf.Name("/StructElem"),
                 "/S": pikepdf.Name("/Document"),
@@ -169,31 +297,31 @@ def add_tags_if_missing(path: Path, title: str) -> list:
                 "/K": pikepdf.Array([]),
             }))
 
-            page_elems = []       # one /Sect per page, children of /Document
-            parent_tree_nums = [] # flat [page_idx, ref, page_idx, ref, ...]
+            page_elems = []
+            parent_tree_nums = []
 
             for page_idx, page in enumerate(pdf.pages):
-                # Each page gets a /Sect containing a heading + paragraph.
-                # Page 1 gets /H1 (document title), others get /H (section heading).
-                # Two MCIDs per page: 0 = heading region, 1 = body region.
                 sect_elem = pdf.make_indirect(pikepdf.Dictionary({
                     "/Type": pikepdf.Name("/StructElem"),
                     "/S": pikepdf.Name("/Sect"),
                     "/P": doc_elem,
                 }))
 
-                heading_tag = "/H1" if page_idx == 0 else "/H"
-                heading_elem = pdf.make_indirect(pikepdf.Dictionary({
-                    "/Type": pikepdf.Name("/StructElem"),
-                    "/S": pikepdf.Name(heading_tag),
-                    "/P": sect_elem,
-                    "/K": pikepdf.Dictionary({
-                        "/Type": pikepdf.Name("/MCR"),
-                        "/Pg": page.obj,
-                        "/MCID": 0,
-                    }),
-                }))
+                sect_children = []
 
+                # Add heading elements with /ActualText for this page
+                page_headings = headings_by_page.get(page_idx, [])
+                for h in page_headings:
+                    tag = f"/H{h['level']}"
+                    h_elem = pdf.make_indirect(pikepdf.Dictionary({
+                        "/Type": pikepdf.Name("/StructElem"),
+                        "/S": pikepdf.Name(tag),
+                        "/P": sect_elem,
+                        "/ActualText": pikepdf.String(h["text"]),
+                    }))
+                    sect_children.append(h_elem)
+
+                # Body paragraph with MCID wrapping all page content
                 para_elem = pdf.make_indirect(pikepdf.Dictionary({
                     "/Type": pikepdf.Name("/StructElem"),
                     "/S": pikepdf.Name("/P"),
@@ -201,17 +329,15 @@ def add_tags_if_missing(path: Path, title: str) -> list:
                     "/K": pikepdf.Dictionary({
                         "/Type": pikepdf.Name("/MCR"),
                         "/Pg": page.obj,
-                        "/MCID": 1,
+                        "/MCID": 0,
                     }),
                 }))
+                sect_children.append(para_elem)
 
-                sect_elem["/K"] = pikepdf.Array([heading_elem, para_elem])
+                sect_elem["/K"] = pikepdf.Array(sect_children)
                 page_elems.append(sect_elem)
 
-                # Wrap the page content stream with two marked regions:
-                #   MCID 0 = heading (first line area), MCID 1 = body (rest)
-                # We can't perfectly split content, so the heading region is
-                # a thin wrapper and the body gets the bulk of the content.
+                # Wrap page content in single BDC/EMC
                 if "/Contents" in page:
                     contents = page["/Contents"]
                     if isinstance(contents, pikepdf.Array):
@@ -219,24 +345,17 @@ def add_tags_if_missing(path: Path, title: str) -> list:
                     else:
                         old_streams = [contents]
 
-                    heading_bdc = pdf.make_stream(
-                        f"{heading_tag} <</MCID 0>> BDC\nEMC\n".encode()
-                    )
-                    body_bdc = pdf.make_stream(b"/P <</MCID 1>> BDC\n")
-                    body_emc = pdf.make_stream(b"\nEMC\n")
+                    bdc = pdf.make_stream(b"/P <</MCID 0>> BDC\n")
+                    emc = pdf.make_stream(b"\nEMC\n")
                     page["/Contents"] = pikepdf.Array(
-                        [heading_bdc, body_bdc] + old_streams + [body_emc]
+                        [bdc] + old_streams + [emc]
                     )
 
-                # Link page back to structure tree
                 page.obj["/StructParents"] = page_idx
 
-                # ParentTree: maps StructParents index -> array of struct elems
-                # for all MCIDs on this page (MCID 0 = heading, MCID 1 = para)
                 parent_tree_nums.append(page_idx)
-                parent_tree_nums.append(pikepdf.Array([heading_elem, para_elem]))
+                parent_tree_nums.append(pikepdf.Array([para_elem]))
 
-            # Wire everything together
             doc_elem["/K"] = pikepdf.Array(page_elems)
             struct_root["/K"] = pikepdf.Array([doc_elem])
             struct_root["/ParentTree"] = pdf.make_indirect(pikepdf.Dictionary({
@@ -244,11 +363,18 @@ def add_tags_if_missing(path: Path, title: str) -> list:
             }))
             struct_root["/ParentTreeNextKey"] = len(pdf.pages)
 
+            n_h = sum(len(v) for v in headings_by_page.values())
             changes.append(
-                f"Built StructTreeRoot with /Document -> {len(pdf.pages)} "
-                f"/Sect elements (/H1+/P on page 1, /H+/P on rest), "
-                f"ParentTree, and marked content on all pages"
+                f"Built StructTreeRoot: {len(pdf.pages)} pages, "
+                f"{n_h} headings detected ({strategy})"
             )
+            for h in headings[:10]:
+                changes.append(
+                    f"  H{h['level']} p{h['page']+1}: "
+                    f"{h['text'][:60]} ({h['font_size']}pt {h['font_name']})"
+                )
+            if len(headings) > 10:
+                changes.append(f"  ... and {len(headings)-10} more")
 
         # Title
         with pdf.open_metadata() as meta:
@@ -260,25 +386,22 @@ def add_tags_if_missing(path: Path, title: str) -> list:
     return changes
 
 
-def fix_pdf(input_path: Path, output_path: Path, info: dict, title: str) -> str:
-    """Apply accessibility fixes. Returns the mode used."""
+def fix_pdf(input_path: Path, output_path: Path, info: dict, title: str,
+            strategy: str = STRATEGY_AUTO) -> str:
     if info["has_text"]:
-        # Mixed PDF (some real text + scanned images) — redo_ocr preserves
-        # existing text and OCRs image regions so all text is selectable.
         ocrmypdf.ocr(
             input_path, output_path,
             output_type="pdfa-2", title=title, redo_ocr=True,
         )
         mode = "redo-ocr"
     else:
-        # Image-only PDF — needs full OCR
         ocrmypdf.ocr(
             input_path, output_path,
             output_type="pdfa-2", title=title, force_ocr=True,
         )
         mode = "force-ocr"
 
-    add_tags_if_missing(output_path, title)
+    add_tags_if_missing(output_path, title, strategy)
     return mode
 
 
@@ -290,7 +413,7 @@ def verify_output(path: Path, expected_title: str) -> list:
     if not info["has_struct_tree"]:
         errors.append("Missing /StructTreeRoot")
     if not info["has_headings"]:
-        errors.append("Missing headings in structure tree")
+        errors.append("Missing headings with /ActualText")
     if not info["has_text"]:
         errors.append("No text content (OCR may have failed)")
     with pikepdf.open(path) as pdf:
@@ -318,7 +441,6 @@ def verify_output(path: Path, expected_title: str) -> list:
 # GUI
 # ---------------------------------------------------------------------------
 
-# Status constants
 S_COMPLIANT = "Compliant"
 S_NEEDS_FIX = "Needs Fix"
 S_PROCESSING = "Processing..."
@@ -330,17 +452,14 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("PDF Accessibility Fixer")
-        self.root.geometry("960x520")
-        self.root.minsize(800, 400)
+        self.root.geometry("960x700")
+        self.root.minsize(800, 550)
 
         self._build_ui()
-        self._file_data: dict[str, dict] = {}  # filename -> info + status
+        self._file_data: dict[str, dict] = {}
         self._processing = False
 
-        # Auto-scan on launch
         self.root.after(100, self.scan)
-
-    # -- UI construction ----------------------------------------------------
 
     def _build_ui(self):
         # Top button bar
@@ -354,14 +473,31 @@ class App:
         self.btn_fix.pack(side=tk.LEFT, padx=(0, 4))
 
         self.btn_log = ttk.Button(btn_frame, text="Open Log", command=self._open_log)
-        self.btn_log.pack(side=tk.LEFT, padx=(0, 4))
+        self.btn_log.pack(side=tk.LEFT, padx=(0, 12))
+
+        # Strategy dropdown
+        ttk.Label(btn_frame, text="Heading method:").pack(side=tk.LEFT, padx=(0, 4))
+        self.strategy_var = tk.StringVar(value=STRATEGY_AUTO)
+        self.strategy_combo = ttk.Combobox(
+            btn_frame, textvariable=self.strategy_var,
+            values=STRATEGIES, state="readonly", width=20,
+        )
+        self.strategy_combo.pack(side=tk.LEFT, padx=(0, 4))
 
         self.lbl_summary = ttk.Label(btn_frame, text="", font=("Segoe UI", 9))
         self.lbl_summary.pack(side=tk.RIGHT)
 
-        # Treeview
+        # --- Main file table (top half) ---
+        paned = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
+        paned.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 0))
+
+        # File treeview frame
+        file_frame = ttk.Frame(paned)
+        paned.add(file_frame, weight=3)
+
         cols = ("pages", "status", "tags", "title", "details")
-        self.tree = ttk.Treeview(self.root, columns=cols, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(file_frame, columns=cols, show="headings",
+                                 selectmode="browse")
         self.tree.heading("pages", text="Pages")
         self.tree.heading("status", text="Status")
         self.tree.heading("tags", text="Tags")
@@ -370,27 +506,89 @@ class App:
 
         self.tree.column("pages", width=50, anchor=tk.CENTER, stretch=False)
         self.tree.column("status", width=110, anchor=tk.CENTER, stretch=False)
-        self.tree.column("tags", width=130, anchor=tk.CENTER, stretch=False)
+        self.tree.column("tags", width=160, anchor=tk.CENTER, stretch=False)
         self.tree.column("title", width=200, stretch=True)
         self.tree.column("details", width=350, stretch=True)
 
-        # Row tags for coloring
         self.tree.tag_configure("compliant", background="#d4edda")
         self.tree.tag_configure("needs_fix", background="#fff3cd")
         self.tree.tag_configure("processing", background="#cce5ff")
         self.tree.tag_configure("fixed", background="#d4edda")
         self.tree.tag_configure("error", background="#f8d7da")
 
-        # Scrollbar
-        vsb = ttk.Scrollbar(self.root, orient=tk.VERTICAL, command=self.tree.yview)
+        vsb = ttk.Scrollbar(file_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 0))
-        vsb.place(in_=self.tree, relx=1.0, rely=0, relheight=1.0, anchor=tk.NE)
+        # Bind selection to show headings
+        self.tree.bind("<<TreeviewSelect>>", self._on_file_select)
+
+        # --- Heading structure viewer (bottom half) ---
+        heading_frame = ttk.LabelFrame(paned, text="Detected Heading Structure",
+                                       padding=4)
+        paned.add(heading_frame, weight=2)
+
+        h_cols = ("level", "font", "text")
+        self.h_tree = ttk.Treeview(heading_frame, columns=h_cols,
+                                   show="tree headings", selectmode="none",
+                                   height=8)
+        self.h_tree.heading("#0", text="Page")
+        self.h_tree.heading("level", text="Level")
+        self.h_tree.heading("font", text="Font")
+        self.h_tree.heading("text", text="Text")
+
+        self.h_tree.column("#0", width=70, stretch=False)
+        self.h_tree.column("level", width=50, anchor=tk.CENTER, stretch=False)
+        self.h_tree.column("font", width=180, stretch=False)
+        self.h_tree.column("text", width=500, stretch=True)
+
+        self.h_tree.tag_configure("h1", background="#d1ecf1")
+        self.h_tree.tag_configure("h2", background="#e2e3e5")
+        self.h_tree.tag_configure("h3", background="#f8f9fa")
+
+        h_vsb = ttk.Scrollbar(heading_frame, orient=tk.VERTICAL,
+                               command=self.h_tree.yview)
+        self.h_tree.configure(yscrollcommand=h_vsb.set)
+        self.h_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        h_vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
         # Progress bar
         self.progress = ttk.Progressbar(self.root, mode="determinate")
         self.progress.pack(fill=tk.X, padx=6, pady=6)
+
+    # -- Heading viewer -----------------------------------------------------
+
+    def _on_file_select(self, _event=None):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        fname = self.tree.item(iid, "text")
+        if not fname:
+            return
+
+        # Prefer output PDF if it exists, else input
+        output_path = OUTPUT_DIR / fname
+        input_path = BASE_DIR / fname
+        pdf_path = output_path if output_path.exists() else input_path
+
+        strategy = self.strategy_var.get()
+        headings = detect_headings(pdf_path, strategy)
+        self._populate_heading_tree(headings)
+
+    def _populate_heading_tree(self, headings: list[dict]):
+        self.h_tree.delete(*self.h_tree.get_children())
+        for h in headings:
+            level = h["level"]
+            tag = f"h{min(level, 3)}"
+            self.h_tree.insert(
+                "", tk.END,
+                text=f"Page {h['page'] + 1}",
+                values=(f"H{level}", f"{h['font_size']}pt {h['font_name']}",
+                        h["text"]),
+                tags=(tag,),
+            )
 
     # -- Scan ---------------------------------------------------------------
 
@@ -399,6 +597,7 @@ class App:
             return
 
         self.tree.delete(*self.tree.get_children())
+        self.h_tree.delete(*self.h_tree.get_children())
         self._file_data.clear()
 
         log_section("SCAN SESSION STARTED")
@@ -420,30 +619,20 @@ class App:
 
             info = inspect_pdf(pdf_path)
 
-            # Determine issues
             issues = []
             if not info["has_mark_info"]:
                 issues.append("no MarkInfo")
             if not info["has_struct_tree"]:
                 issues.append("no StructTreeRoot")
             elif not info["has_headings"]:
-                issues.append("no headings in structure tree")
+                issues.append("no headings with text")
             if not info["has_good_title"]:
                 issues.append("bad/missing title")
             if not info["has_text"]:
                 issues.append("image-only (needs OCR)")
 
-            tags_str = ""
-            if info["has_mark_info"]:
-                tags_str += "MarkInfo "
-            if info["has_struct_tree"]:
-                tags_str += "StructTree "
-            if info["has_headings"]:
-                tags_str += "Headings"
-            if not tags_str:
-                tags_str = "None"
+            tags_str = self._make_tags_str(info)
 
-            # Log full inspection
             log(f"INSPECTED: {fname}")
             log(f"    Pages:          {info['page_count']}")
             log(f"    Has text:       {info['has_text']}")
@@ -463,20 +652,13 @@ class App:
                 else:
                     log(f"    STATUS: Already compliant — no fixes needed")
             elif (OUTPUT_DIR / fname).exists():
-                # A fixed version exists — verify it and show as previously fixed
                 output_path = OUTPUT_DIR / fname
                 title = derive_title(fname)
                 errors = verify_output(output_path, title)
                 if not errors:
                     out_info = inspect_pdf(output_path)
-                    info = out_info  # display the fixed version's info
-                    tags_str = ""
-                    if out_info["has_mark_info"]:
-                        tags_str += "MarkInfo "
-                    if out_info["has_struct_tree"]:
-                        tags_str += "StructTree "
-                    if out_info["has_headings"]:
-                        tags_str += "Headings"
+                    info = out_info
+                    tags_str = self._make_tags_str(out_info)
                     status = S_FIXED
                     detail = "Previously fixed (in updated/)"
                     tag = "fixed"
@@ -484,10 +666,10 @@ class App:
                     log(f"    STATUS: Previously fixed — verified output in updated/")
                 else:
                     status = S_NEEDS_FIX
-                    detail = "; ".join(issues) + " (prior fix failed verification)"
+                    detail = "; ".join(errors)
                     tag = "needs_fix"
                     n_needs_fix += 1
-                    log(f"    STATUS: Needs fix — prior output failed: {errors}")
+                    log(f"    STATUS: Needs re-fix — output failed: {errors}")
             else:
                 status = S_NEEDS_FIX
                 detail = "; ".join(issues)
@@ -496,16 +678,15 @@ class App:
                 log(f"    STATUS: Needs fix — {detail}")
 
             iid = self.tree.insert(
-                "", tk.END,
-                text=fname,
-                values=(info["page_count"], status, tags_str, info["current_title"], detail),
+                "", tk.END, text=fname,
+                values=(info["page_count"], status, tags_str,
+                        info["current_title"], detail),
                 tags=(tag,),
             )
-            # Override the default hidden 'text' — show filename as first visible column
-            # Actually treeview 'text' is the tree column; let's use #0
-            self._file_data[fname] = {**info, "status": status, "iid": iid, "path": pdf_path}
+            self._file_data[fname] = {
+                **info, "status": status, "iid": iid, "path": pdf_path,
+            }
 
-        # Show filename in #0 column
         self.tree["displaycolumns"] = ("pages", "status", "tags", "title", "details")
         self.tree["show"] = ("tree", "headings")
         self.tree.heading("#0", text="File")
@@ -514,6 +695,17 @@ class App:
         summary = f"{n_compliant} compliant, {n_needs_fix} need fixing"
         self.lbl_summary.config(text=summary)
         log(f"SCAN SUMMARY: {len(pdfs)} PDFs — {summary}")
+
+    @staticmethod
+    def _make_tags_str(info: dict) -> str:
+        parts = []
+        if info["has_mark_info"]:
+            parts.append("MarkInfo")
+        if info["has_struct_tree"]:
+            parts.append("StructTree")
+        if info["has_headings"]:
+            parts.append("Headings")
+        return " ".join(parts) or "None"
 
     # -- Fix all ------------------------------------------------------------
 
@@ -534,13 +726,18 @@ class App:
         self.progress["maximum"] = len(to_fix)
         self.progress["value"] = 0
 
+        strategy = self.strategy_var.get()
+
         log_section("FIX SESSION STARTED")
         log(f"Files to process: {len(to_fix)}")
+        log(f"Heading strategy: {strategy}")
 
-        thread = threading.Thread(target=self._fix_worker, args=(to_fix,), daemon=True)
+        thread = threading.Thread(
+            target=self._fix_worker, args=(to_fix, strategy), daemon=True,
+        )
         thread.start()
 
-    def _fix_worker(self, to_fix: list):
+    def _fix_worker(self, to_fix: list, strategy: str):
         n_fixed = 0
         n_errors = 0
 
@@ -548,8 +745,8 @@ class App:
             iid = data["iid"]
             pdf_path = data["path"]
 
-            # Update row to "Processing..."
-            self.root.after(0, self._update_row, iid, S_PROCESSING, "processing", "Working...")
+            self.root.after(0, self._update_row, iid, S_PROCESSING,
+                            "processing", "Working...")
 
             title = derive_title(fname)
             output_path = OUTPUT_DIR / fname
@@ -557,37 +754,31 @@ class App:
 
             log(f"PROCESSING: {fname}")
             log(f"    Mode:     {mode}")
+            log(f"    Strategy: {strategy}")
             log(f"    Title:    '{title}'")
             log(f"    Pages:    {data['page_count']}")
-            log(f"    Output:   {output_path}")
 
             t0 = time.time()
             try:
-                actual_mode = fix_pdf(pdf_path, output_path, data, title)
+                actual_mode = fix_pdf(pdf_path, output_path, data, title,
+                                      strategy)
                 elapsed = time.time() - t0
-                log(f"    OCR/convert completed in {elapsed:.1f}s (mode={actual_mode})")
+                log(f"    Completed in {elapsed:.1f}s (mode={actual_mode})")
 
-                # Verify
                 errors = verify_output(output_path, title)
                 if errors:
                     detail = "; ".join(errors)
                     log(f"    VERIFY FAILED: {detail}")
-                    self.root.after(0, self._update_row, iid, S_ERROR, "error", detail)
+                    self.root.after(0, self._update_row, iid, S_ERROR,
+                                    "error", detail)
                     n_errors += 1
                 else:
-                    # Re-inspect output for display
                     out_info = inspect_pdf(output_path)
-                    tags_str = ""
-                    if out_info["has_mark_info"]:
-                        tags_str += "MarkInfo "
-                    if out_info["has_struct_tree"]:
-                        tags_str += "StructTree "
-                    if out_info["has_headings"]:
-                        tags_str += "Headings"
+                    tags_str = self._make_tags_str(out_info)
 
                     detail = f"Fixed in {elapsed:.1f}s — {mode}"
                     log(f"    VERIFY OK: all checks pass")
-                    log(f"    Output size: {output_path.stat().st_size / 1024:.0f} KB")
+                    log(f"    Output: {output_path.stat().st_size / 1024:.0f} KB")
                     self.root.after(
                         0, self._update_row_full, iid, S_FIXED, "fixed",
                         tags_str, title, detail,
@@ -598,10 +789,10 @@ class App:
                 elapsed = time.time() - t0
                 log(f"    ERROR after {elapsed:.1f}s: {e}")
                 log(f"    TRACEBACK:\n{traceback.format_exc()}")
-                self.root.after(0, self._update_row, iid, S_ERROR, "error", str(e)[:120])
+                self.root.after(0, self._update_row, iid, S_ERROR,
+                                "error", str(e)[:120])
                 n_errors += 1
 
-            # Progress
             self.root.after(0, self._set_progress, idx + 1)
 
         log(f"FIX SESSION COMPLETE: {n_fixed} fixed, {n_errors} errors")
@@ -609,27 +800,25 @@ class App:
 
     # -- Thread-safe UI updates ---------------------------------------------
 
-    def _update_row(self, iid: str, status: str, tag: str, detail: str):
+    def _update_row(self, iid, status, tag, detail):
         self.tree.set(iid, "status", status)
         self.tree.set(iid, "details", detail)
         self.tree.item(iid, tags=(tag,))
 
-    def _update_row_full(self, iid: str, status: str, tag: str, tags_str: str,
-                         title: str, detail: str):
+    def _update_row_full(self, iid, status, tag, tags_str, title, detail):
         self.tree.set(iid, "status", status)
         self.tree.set(iid, "tags", tags_str)
         self.tree.set(iid, "title", title)
         self.tree.set(iid, "details", detail)
         self.tree.item(iid, tags=(tag,))
 
-    def _set_progress(self, value: int):
+    def _set_progress(self, value):
         self.progress["value"] = value
 
-    def _fix_done(self, n_fixed: int, n_errors: int):
+    def _fix_done(self, n_fixed, n_errors):
         self._processing = False
         self.btn_fix.config(state=tk.NORMAL)
         self.btn_scan.config(state=tk.NORMAL)
-        # Refresh summary counts
         n_compliant = sum(
             1 for d in self._file_data.values()
             if self.tree.set(d["iid"], "status") in (S_COMPLIANT, S_FIXED)
