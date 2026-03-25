@@ -1,5 +1,7 @@
 # PDF Accessibility Fixer
 
+![PDF Accessibility Fixer](logo.png)
+
 A tkinter GUI tool that scans course PDFs for accessibility compliance and automatically fixes common issues flagged by the University of Washington's accessibility requirements.
 
 ## What it fixes
