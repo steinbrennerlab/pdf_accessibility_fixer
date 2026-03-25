@@ -88,12 +88,9 @@ def _extract_text_lines(path: Path, page_num: int) -> list[dict]:
 
 def detect_headings(path: Path, strategy: str = STRATEGY_AUTO) -> list[dict]:
     """Detect headings across all pages. Returns list of heading dicts."""
-    try:
-        # Get page count
-        with pikepdf.open(path) as pdf:
-            n_pages = len(pdf.pages)
-    except Exception:
-        return []
+    # Get page count — let exceptions propagate so callers can report them
+    with pikepdf.open(path) as pdf:
+        n_pages = len(pdf.pages)
 
     all_headings = []
 
@@ -386,21 +383,31 @@ def add_tags_if_missing(path: Path, title: str,
     return changes
 
 
+def _run_ocr(input_path: Path, output_path: Path, title: str,
+             has_text: bool) -> str:
+    """Run ocrmypdf, falling back to plain PDF output on color space errors."""
+    ocr_flag = {"redo_ocr": True} if has_text else {"force_ocr": True}
+    mode = "redo-ocr" if has_text else "force-ocr"
+
+    try:
+        ocrmypdf.ocr(
+            input_path, output_path,
+            output_type="pdfa-2", title=title, **ocr_flag,
+        )
+    except ocrmypdf.exceptions.ColorConversionNeededError:
+        log(f"    Color space issue — retrying with output_type=pdf")
+        ocrmypdf.ocr(
+            input_path, output_path,
+            output_type="pdf", title=title, **ocr_flag,
+        )
+        mode += " (skipped PDF/A — unusual color space)"
+
+    return mode
+
+
 def fix_pdf(input_path: Path, output_path: Path, info: dict, title: str,
             strategy: str = STRATEGY_AUTO) -> str:
-    if info["has_text"]:
-        ocrmypdf.ocr(
-            input_path, output_path,
-            output_type="pdfa-2", title=title, redo_ocr=True,
-        )
-        mode = "redo-ocr"
-    else:
-        ocrmypdf.ocr(
-            input_path, output_path,
-            output_type="pdfa-2", title=title, force_ocr=True,
-        )
-        mode = "force-ocr"
-
+    mode = _run_ocr(input_path, output_path, title, info["has_text"])
     add_tags_if_missing(output_path, title, strategy)
     return mode
 
@@ -547,6 +554,8 @@ class App:
         self.h_tree.tag_configure("h1", background="#d1ecf1")
         self.h_tree.tag_configure("h2", background="#e2e3e5")
         self.h_tree.tag_configure("h3", background="#f8f9fa")
+        self.h_tree.tag_configure("error", foreground="#721c24",
+                                  background="#f8d7da")
 
         h_vsb = ttk.Scrollbar(heading_frame, orient=tk.VERTICAL,
                                command=self.h_tree.yview)
@@ -575,8 +584,17 @@ class App:
         pdf_path = output_path if output_path.exists() else input_path
 
         strategy = self.strategy_var.get()
-        headings = detect_headings(pdf_path, strategy)
-        self._populate_heading_tree(headings)
+
+        # Run heading detection in background to avoid freezing the GUI
+        def _detect():
+            try:
+                headings = detect_headings(pdf_path, strategy)
+                self.root.after(0, self._populate_heading_tree, headings)
+            except Exception as e:
+                self.root.after(0, self._show_detail_error,
+                                f"{type(e).__name__}: {e}")
+
+        threading.Thread(target=_detect, daemon=True).start()
 
     def _populate_heading_tree(self, headings: list[dict]):
         self.h_tree.delete(*self.h_tree.get_children())
@@ -591,23 +609,38 @@ class App:
                 tags=(tag,),
             )
 
+    def _show_detail_error(self, message: str):
+        self.h_tree.delete(*self.h_tree.get_children())
+        self.h_tree.insert(
+            "", tk.END, text="Error",
+            values=("", "", message),
+            tags=("error",),
+        )
+
     # -- Scan ---------------------------------------------------------------
 
     def scan(self):
         if self._processing:
             return
 
+        self._processing = True
+        self.btn_scan.config(state=tk.DISABLED)
+        self.btn_fix.config(state=tk.DISABLED)
         self.tree.delete(*self.tree.get_children())
         self.h_tree.delete(*self.h_tree.get_children())
         self._file_data.clear()
+        self.lbl_summary.config(text="Scanning...")
 
+        threading.Thread(target=self._scan_worker, daemon=True).start()
+
+    def _scan_worker(self):
         log_section("SCAN SESSION STARTED")
 
         OUTPUT_DIR.mkdir(exist_ok=True)
         pdfs = sorted(BASE_DIR.glob("*.pdf"))
 
         if not pdfs:
-            self.lbl_summary.config(text="No PDFs found.")
+            self.root.after(0, self._scan_done, 0, 0, 0)
             log("No PDF files found in folder.")
             return
 
@@ -678,24 +711,38 @@ class App:
                 n_needs_fix += 1
                 log(f"    STATUS: Needs fix — {detail}")
 
-            iid = self.tree.insert(
-                "", tk.END, text=fname,
-                values=(info["page_count"], status, tags_str,
-                        info["current_title"], detail),
-                tags=(tag,),
+            # Insert row on main thread
+            self.root.after(0, self._scan_add_row, fname, info, status,
+                            tags_str, detail, tag, pdf_path)
+
+        log(f"SCAN SUMMARY: {len(pdfs)} PDFs — {n_compliant} compliant, {n_needs_fix} need fixing")
+        self.root.after(0, self._scan_done, len(pdfs), n_compliant, n_needs_fix)
+
+    def _scan_add_row(self, fname, info, status, tags_str, detail, tag, pdf_path):
+        iid = self.tree.insert(
+            "", tk.END, text=fname,
+            values=(info["page_count"], status, tags_str,
+                    info["current_title"], detail),
+            tags=(tag,),
+        )
+        self._file_data[fname] = {
+            **info, "status": status, "iid": iid, "path": pdf_path,
+        }
+
+    def _scan_done(self, n_pdfs, n_compliant, n_needs_fix):
+        if n_pdfs == 0:
+            self.lbl_summary.config(text="No PDFs found.")
+        else:
+            self.tree["displaycolumns"] = ("pages", "status", "tags", "title", "details")
+            self.tree["show"] = ("tree", "headings")
+            self.tree.heading("#0", text="File")
+            self.tree.column("#0", width=250, stretch=False)
+            self.lbl_summary.config(
+                text=f"{n_compliant} compliant, {n_needs_fix} need fixing"
             )
-            self._file_data[fname] = {
-                **info, "status": status, "iid": iid, "path": pdf_path,
-            }
-
-        self.tree["displaycolumns"] = ("pages", "status", "tags", "title", "details")
-        self.tree["show"] = ("tree", "headings")
-        self.tree.heading("#0", text="File")
-        self.tree.column("#0", width=250, stretch=False)
-
-        summary = f"{n_compliant} compliant, {n_needs_fix} need fixing"
-        self.lbl_summary.config(text=summary)
-        log(f"SCAN SUMMARY: {len(pdfs)} PDFs — {summary}")
+        self._processing = False
+        self.btn_scan.config(state=tk.NORMAL)
+        self.btn_fix.config(state=tk.NORMAL)
 
     @staticmethod
     def _make_tags_str(info: dict) -> str:
