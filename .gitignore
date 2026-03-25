@@ -1,0 +1,20 @@
+# Ignore all PDFs by default
+*.pdf
+
+# But keep the example input PDFs
+!Wk1_Janeway_Ch1_Sec1-5.pdf
+!Wk1_Janeway1989.pdf
+!Wk1_HerronFreeman_Chapters.pdf
+
+# Ignore processed output PDFs entirely
+updated/*.pdf
+
+# Log files
+accessibility_log.txt
+
+# Python
+__pycache__/
+*.pyc
+
+# Claude Code internals
+.claude/
