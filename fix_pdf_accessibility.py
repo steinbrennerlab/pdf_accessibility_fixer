@@ -220,16 +220,20 @@ def add_tags_if_missing(path: Path, title: str) -> list:
 
 
 def fix_pdf(input_path: Path, output_path: Path, info: dict, title: str) -> str:
-    """Apply accessibility fixes. Returns the OCR mode used."""
-    kwargs = dict(output_type="pdfa-2", title=title)
+    """Apply accessibility fixes. Returns the mode used."""
     if info["has_text"]:
-        kwargs["skip_text"] = True
-        mode = "skip-text"
+        # PDF already has selectable text — skip Ghostscript/ocrmypdf entirely
+        # to avoid font mangling during PDF/A conversion. Just copy and tag.
+        import shutil
+        shutil.copy2(input_path, output_path)
+        mode = "tag-only"
     else:
-        kwargs["force_ocr"] = True
+        # Image-only PDF — needs OCR via ocrmypdf + Ghostscript
+        ocrmypdf.ocr(
+            input_path, output_path,
+            output_type="pdfa-2", title=title, force_ocr=True,
+        )
         mode = "force-ocr"
-
-    ocrmypdf.ocr(input_path, output_path, **kwargs)
 
     add_tags_if_missing(output_path, title)
     return mode
