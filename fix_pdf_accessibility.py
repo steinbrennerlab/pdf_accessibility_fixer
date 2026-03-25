@@ -50,13 +50,14 @@ def log_section(title: str) -> None:
 # Heading detection
 # ---------------------------------------------------------------------------
 
-def _extract_text_lines(path: Path, page_num: int) -> list[dict]:
-    """Extract text lines with font info from a single page using pdfminer."""
-    lines = []
+def _extract_all_text_lines(path: Path) -> dict[int, list[dict]]:
+    """Extract text lines with font info from all pages in a single pass."""
+    page_lines: dict[int, list[dict]] = {}
     try:
         for pg_idx, page_layout in enumerate(extract_pages(
-            str(path), page_numbers=[page_num], laparams=LAParams()
+            str(path), laparams=LAParams()
         )):
+            lines = []
             for elem in page_layout:
                 if isinstance(elem, LTTextBox):
                     for line in elem:
@@ -81,27 +82,23 @@ def _extract_text_lines(path: Path, page_num: int) -> list[dict]:
                             "is_bold": font_name and ("Bold" in font_name
                                                        or "bold" in font_name),
                         })
+            page_lines[pg_idx] = lines
     except Exception:
         pass
-    return lines
+    return page_lines
 
 
 def detect_headings(path: Path, strategy: str = STRATEGY_AUTO) -> list[dict]:
     """Detect headings across all pages. Returns list of heading dicts."""
-    # Get page count — let exceptions propagate so callers can report them
-    with pikepdf.open(path) as pdf:
-        n_pages = len(pdf.pages)
+    # Extract all pages in one pass (avoids re-parsing the PDF per page)
+    page_lines = _extract_all_text_lines(path)
 
     all_headings = []
 
     if strategy == STRATEGY_AUTO:
-        # First pass: collect all font sizes across all pages to find body size
-        all_sizes = []
-        page_lines = {}
-        for pg in range(n_pages):
-            lines = _extract_text_lines(path, pg)
-            page_lines[pg] = lines
-            all_sizes.extend(ln["font_size"] for ln in lines)
+        # Collect all font sizes across all pages to find body size
+        all_sizes = [ln["font_size"] for lines in page_lines.values()
+                     for ln in lines]
 
         if not all_sizes:
             return []
@@ -121,8 +118,8 @@ def detect_headings(path: Path, strategy: str = STRATEGY_AUTO) -> list[dict]:
         for i, sz in enumerate(heading_sizes):
             size_to_level[sz] = min(i + 1, 3)
 
-        for pg in range(n_pages):
-            for ln in page_lines.get(pg, []):
+        for pg in sorted(page_lines):
+            for ln in page_lines[pg]:
                 if ln["font_size"] in size_to_level:
                     all_headings.append({
                         "page": pg,
@@ -133,8 +130,8 @@ def detect_headings(path: Path, strategy: str = STRATEGY_AUTO) -> list[dict]:
                     })
 
     elif strategy == STRATEGY_FIRST_LINE:
-        for pg in range(n_pages):
-            lines = _extract_text_lines(path, pg)
+        for pg in sorted(page_lines):
+            lines = page_lines[pg]
             if lines:
                 # Topmost line (highest y)
                 top = max(lines, key=lambda l: l["y"])
@@ -147,9 +144,8 @@ def detect_headings(path: Path, strategy: str = STRATEGY_AUTO) -> list[dict]:
                 })
 
     elif strategy == STRATEGY_BOLD:
-        for pg in range(n_pages):
-            lines = _extract_text_lines(path, pg)
-            for ln in lines:
+        for pg in sorted(page_lines):
+            for ln in page_lines[pg]:
                 if ln["is_bold"]:
                     all_headings.append({
                         "page": pg,
