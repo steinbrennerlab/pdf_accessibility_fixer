@@ -460,6 +460,7 @@ class App:
 
         self._build_ui()
         self._file_data: dict[str, dict] = {}
+        self._heading_request_id = 0
         self._processing = False
 
         self.root.after(100, self.scan)
@@ -566,33 +567,50 @@ class App:
     # -- Heading viewer -----------------------------------------------------
 
     def _on_file_select(self, _event=None):
+        self._refresh_heading_view()
+
+    def _refresh_heading_view(self):
         sel = self.tree.selection()
         if not sel:
+            self._heading_request_id += 1
+            self.h_tree.delete(*self.h_tree.get_children())
             return
+
         iid = sel[0]
         fname = self.tree.item(iid, "text")
         if not fname:
+            self._heading_request_id += 1
+            self.h_tree.delete(*self.h_tree.get_children())
             return
 
-        # Prefer output PDF if it exists, else input
-        output_path = OUTPUT_DIR / fname
-        input_path = BASE_DIR / fname
-        pdf_path = output_path if output_path.exists() else input_path
+        pdf_path = self._file_data.get(fname, {}).get("path", BASE_DIR / fname)
 
         strategy = self.strategy_var.get()
+        self._heading_request_id += 1
+        request_id = self._heading_request_id
 
         # Run heading detection in background to avoid freezing the GUI
         def _detect():
             try:
                 headings = detect_headings(pdf_path, strategy)
-                self.root.after(0, self._populate_heading_tree, headings)
+                self.root.after(
+                    0, self._populate_heading_tree, request_id, fname, headings,
+                )
             except Exception as e:
-                self.root.after(0, self._show_detail_error,
-                                f"{type(e).__name__}: {e}")
+                self.root.after(
+                    0, self._show_detail_error, request_id, fname,
+                    f"{type(e).__name__}: {e}",
+                )
 
         threading.Thread(target=_detect, daemon=True).start()
 
-    def _populate_heading_tree(self, headings: list[dict]):
+    def _populate_heading_tree(self, request_id: int, fname: str,
+                               headings: list[dict]):
+        if request_id != self._heading_request_id:
+            return
+        if fname != self._selected_filename():
+            return
+
         self.h_tree.delete(*self.h_tree.get_children())
         for h in headings:
             level = h["level"]
@@ -605,13 +623,25 @@ class App:
                 tags=(tag,),
             )
 
-    def _show_detail_error(self, message: str):
+    def _show_detail_error(self, request_id: int, fname: str, message: str):
+        if request_id != self._heading_request_id:
+            return
+        if fname != self._selected_filename():
+            return
+
         self.h_tree.delete(*self.h_tree.get_children())
         self.h_tree.insert(
             "", tk.END, text="Error",
             values=("", "", message),
             tags=("error",),
         )
+
+    def _selected_filename(self) -> str | None:
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        fname = self.tree.item(sel[0], "text")
+        return fname or None
 
     # -- Scan ---------------------------------------------------------------
 
@@ -620,6 +650,7 @@ class App:
             return
 
         self._processing = True
+        self._heading_request_id += 1
         self.btn_scan.config(state=tk.DISABLED)
         self.btn_fix.config(state=tk.DISABLED)
         self.tree.delete(*self.tree.get_children())
@@ -646,6 +677,7 @@ class App:
         for pdf_path in pdfs:
             fname = pdf_path.name
             is_known_good = fname in KNOWN_GOOD
+            display_path = pdf_path
 
             info = inspect_pdf(pdf_path)
 
@@ -688,6 +720,7 @@ class App:
                 if not errors:
                     out_info = inspect_pdf(output_path)
                     info = out_info
+                    display_path = output_path
                     tags_str = self._make_tags_str(out_info)
                     status = S_FIXED
                     detail = "Previously fixed (in updated/)"
@@ -709,7 +742,7 @@ class App:
 
             # Insert row on main thread
             self.root.after(0, self._scan_add_row, fname, info, status,
-                            tags_str, detail, tag, pdf_path)
+                            tags_str, detail, tag, display_path)
 
         log(f"SCAN SUMMARY: {len(pdfs)} PDFs — {n_compliant} compliant, {n_needs_fix} need fixing")
         self.root.after(0, self._scan_done, len(pdfs), n_compliant, n_needs_fix)
@@ -831,7 +864,7 @@ class App:
                     log(f"    Output: {output_path.stat().st_size / 1024:.0f} KB")
                     self.root.after(
                         0, self._update_row_full, iid, S_FIXED, "fixed",
-                        tags_str, title, detail,
+                        tags_str, title, detail, out_info, output_path,
                     )
                     n_fixed += 1
 
@@ -854,13 +887,27 @@ class App:
         self.tree.set(iid, "status", status)
         self.tree.set(iid, "details", detail)
         self.tree.item(iid, tags=(tag,))
+        fname = self.tree.item(iid, "text")
+        if fname in self._file_data:
+            self._file_data[fname]["status"] = status
 
-    def _update_row_full(self, iid, status, tag, tags_str, title, detail):
+    def _update_row_full(self, iid, status, tag, tags_str, title, detail,
+                         info=None, pdf_path=None):
         self.tree.set(iid, "status", status)
         self.tree.set(iid, "tags", tags_str)
         self.tree.set(iid, "title", title)
         self.tree.set(iid, "details", detail)
         self.tree.item(iid, tags=(tag,))
+        fname = self.tree.item(iid, "text")
+        if fname in self._file_data:
+            self._file_data[fname]["status"] = status
+            self._file_data[fname]["current_title"] = title
+            if info:
+                self._file_data[fname].update(info)
+            if pdf_path is not None:
+                self._file_data[fname]["path"] = pdf_path
+        if fname and fname == self._selected_filename():
+            self._refresh_heading_view()
 
     def _set_progress(self, value):
         self.progress["value"] = value
