@@ -20,6 +20,7 @@ from accessibility_core import (
     PdfInfo,
     derive_title,
     detect_headings,
+    read_structure_headings,
 )
 from accessibility_workflow import (
     LOG_FILE,
@@ -149,8 +150,8 @@ class App:
         detail_paned = ttk.PanedWindow(paned, orient=tk.HORIZONTAL)
         paned.add(detail_paned, weight=2)
 
-        # --- Left panel: Detected Features ---
-        left_frame = ttk.LabelFrame(detail_paned, text="Detected Features", padding=4)
+        # --- Left panel: Source PDF ---
+        left_frame = ttk.LabelFrame(detail_paned, text="Source PDF", padding=4)
         detail_paned.add(left_frame, weight=1)
 
         self.props_text = tk.Text(
@@ -168,7 +169,7 @@ class App:
         self.props_text.tag_configure("label", foreground="#495057")
 
         ttk.Separator(left_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=2)
-        ttk.Label(left_frame, text="Heading Structure:", font=("Segoe UI", 9, "bold")).pack(
+        ttk.Label(left_frame, text="Detected Headings:", font=("Segoe UI", 9, "bold")).pack(
             anchor=tk.W, pady=(2, 2)
         )
 
@@ -204,8 +205,8 @@ class App:
         self.h_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         h_vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # --- Right panel: Fix Preview ---
-        right_frame = ttk.LabelFrame(detail_paned, text="Fix Preview", padding=4)
+        # --- Right panel: Output PDF ---
+        right_frame = ttk.LabelFrame(detail_paned, text="Output PDF", padding=4)
         detail_paned.add(right_frame, weight=1)
 
         self.preview_text = tk.Text(
@@ -216,6 +217,7 @@ class App:
             cursor="arrow",
         )
         self.preview_text.pack(fill=tk.BOTH, expand=True)
+        self.preview_text.tag_configure("label", foreground="#495057")
         self.preview_text.tag_configure("section", font=("Segoe UI", 10, "bold"), foreground="#004085")
         self.preview_text.tag_configure("action", foreground="#155724")
         self.preview_text.tag_configure("skip", foreground="#856404")
@@ -250,7 +252,7 @@ class App:
             return
 
         info = entry.info
-        self.props_text.insert(tk.END, f"File: {entry.path}\n", "label")
+        self.props_text.insert(tk.END, f"{entry.source_path}\n", "label")
         self.props_text.insert(tk.END, f"Pages: {info.page_count}\n", "label")
 
         tag = "pass" if info.has_text else "fail"
@@ -284,8 +286,19 @@ class App:
         strategy = self._current_strategy()
 
         if status in {S_COMPLIANT, S_FIXED}:
-            self.preview_text.insert(tk.END, "No changes needed.\n", "no_change")
-            self.preview_text.insert(tk.END, f"\nStatus: {status}\n", "no_change")
+            self.preview_text.insert(tk.END, f"updated/{entry.name}\n", "label")
+            self.preview_text.insert(tk.END, f"Status: {status}\n\n", "no_change")
+            struct_headings = read_structure_headings(entry.path)
+            if struct_headings:
+                self.preview_text.insert(tk.END, "Embedded Headings:\n", "section")
+                for h in struct_headings:
+                    self.preview_text.insert(
+                        tk.END,
+                        f"  H{h.level}: {h.text[:70]}\n",
+                        "heading_item",
+                    )
+            else:
+                self.preview_text.insert(tk.END, "No headings in structure tree.\n", "skip")
             self.preview_text.config(state=tk.DISABLED)
             return
 
@@ -294,8 +307,13 @@ class App:
             self.preview_text.config(state=tk.DISABLED)
             return
 
+        # --- Needs Fix or Error: show planned changes ---
+        self.preview_text.insert(tk.END, f"updated/{entry.name}\n", "label")
+
         if status == S_ERROR:
-            self.preview_text.insert(tk.END, "Previous attempt failed. Fix Selected will retry:\n\n", "error")
+            self.preview_text.insert(tk.END, "Previous attempt failed. Retry will:\n\n", "error")
+        else:
+            self.preview_text.insert(tk.END, "Fix Selected will:\n\n", "label")
 
         title = derive_title(entry.name)
 
@@ -306,7 +324,7 @@ class App:
             self.preview_text.insert(tk.END, "   Re-run OCR (text exists)\n", "action")
         else:
             self.preview_text.insert(tk.END, "   Full OCR (image-only pages)\n", "action")
-        self.preview_text.insert(tk.END, "   Output: PDF/A-2 format\n\n", "action")
+        self.preview_text.insert(tk.END, "   Format: PDF/A-2\n\n", "action")
 
         # 2. Structure tags
         self.preview_text.insert(tk.END, "2. Structure Tags\n", "section")
@@ -321,7 +339,7 @@ class App:
             if headings is not None:
                 count = len(headings)
                 noun = "heading" if count == 1 else "headings"
-                self.preview_text.insert(tk.END, f"   {count} {noun} detected:\n", "action")
+                self.preview_text.insert(tk.END, f"   {count} {noun} to embed:\n", "action")
                 for h in headings[:8]:
                     self.preview_text.insert(
                         tk.END,
@@ -348,12 +366,6 @@ class App:
         else:
             self.preview_text.insert(tk.END, f'   Current: "{info.current_title}"\n', "skip")
             self.preview_text.insert(tk.END, f'   Update to: "{title}"\n', "action")
-
-        self.preview_text.insert(tk.END, "\n", "")
-
-        # 4. Output
-        self.preview_text.insert(tk.END, "4. Output\n", "section")
-        self.preview_text.insert(tk.END, f"   Save to: updated/{entry.name}\n", "action")
 
         self.preview_text.config(state=tk.DISABLED)
 

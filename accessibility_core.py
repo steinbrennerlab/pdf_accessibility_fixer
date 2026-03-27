@@ -222,6 +222,38 @@ def detect_headings(path: Path, strategy: str = STRATEGY_AUTO) -> list[Heading]:
     return headings
 
 
+def read_structure_headings(path: Path) -> list[Heading]:
+    """Read heading text from the PDF structure tree (not from font extraction)."""
+    heading_names = {"/H": 1, "/H1": 1, "/H2": 2, "/H3": 3, "/H4": 4, "/H5": 5, "/H6": 6}
+    headings: list[Heading] = []
+    try:
+        with pikepdf.open(path) as pdf:
+            struct_tree = pdf.Root.get("/StructTreeRoot")
+            if struct_tree is None:
+                return []
+            for document in _as_pdf_list(struct_tree.get("/K")):
+                if not isinstance(document, pikepdf.Dictionary):
+                    continue
+                for section in _as_pdf_list(document.get("/K")):
+                    if not isinstance(section, pikepdf.Dictionary):
+                        continue
+                    for child in _as_pdf_list(section.get("/K")):
+                        if not isinstance(child, pikepdf.Dictionary):
+                            continue
+                        tag_name = str(child.get("/S", ""))
+                        if tag_name in heading_names and "/ActualText" in child:
+                            headings.append(Heading(
+                                page=0,
+                                level=heading_names[tag_name],
+                                text=str(child["/ActualText"]),
+                                font_size=0,
+                                font_name="",
+                            ))
+    except Exception:
+        pass
+    return headings
+
+
 def _struct_tree_is_empty(root) -> bool:
     struct_tree = root.get("/StructTreeRoot")
     if struct_tree is None:
