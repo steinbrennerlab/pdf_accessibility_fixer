@@ -177,6 +177,23 @@ def _detect_bold_headings(
     return headings
 
 
+def _normalize_heading_levels(headings: list[Heading]) -> list[Heading]:
+    """Ensure headings begin at level 1 (accessibility requirement)."""
+    if not headings or headings[0].level == 1:
+        return headings
+    shift = headings[0].level - 1
+    return [
+        Heading(
+            page=h.page,
+            level=max(1, h.level - shift),
+            text=h.text,
+            font_size=h.font_size,
+            font_name=h.font_name,
+        )
+        for h in headings
+    ]
+
+
 def detect_headings(path: Path, strategy: str = STRATEGY_AUTO) -> list[Heading]:
     """Detect headings across all pages."""
     page_lines = _extract_all_text_lines(path)
@@ -203,23 +220,21 @@ def detect_headings(path: Path, strategy: str = STRATEGY_AUTO) -> list[Heading]:
                     level = size_to_level.get(line.font_size)
                     if level is not None:
                         headings.append(_heading_from_line(page, level, line))
-
-            return headings
-
-        total_lines = sum(len(lines) for lines in page_lines.values())
-        bold_headings = _detect_bold_headings(page_lines, min_font_size=body_size)
-        if bold_headings and len(bold_headings) <= max(1, total_lines // 2):
-            return bold_headings
-
-        return _detect_first_line_headings(page_lines)
+        else:
+            total_lines = sum(len(lines) for lines in page_lines.values())
+            bold_headings = _detect_bold_headings(page_lines, min_font_size=body_size)
+            if bold_headings and len(bold_headings) <= max(1, total_lines // 2):
+                headings = bold_headings
+            else:
+                headings = _detect_first_line_headings(page_lines)
 
     elif strategy == STRATEGY_FIRST_LINE:
-        return _detect_first_line_headings(page_lines)
+        headings = _detect_first_line_headings(page_lines)
 
     elif strategy == STRATEGY_BOLD:
-        return _detect_bold_headings(page_lines)
+        headings = _detect_bold_headings(page_lines)
 
-    return headings
+    return _normalize_heading_levels(headings)
 
 
 def read_structure_headings(path: Path) -> list[Heading]:
@@ -503,6 +518,10 @@ def verify_output(path: Path, expected_title: str) -> list[str]:
         errors.append("Missing /StructTreeRoot")
     if not info.has_headings:
         errors.append("Missing headings with /ActualText")
+    else:
+        struct_headings = read_structure_headings(path)
+        if struct_headings and struct_headings[0].level != 1:
+            errors.append(f"Headings start at H{struct_headings[0].level}, not H1")
     if not info.has_text:
         errors.append("No text content (OCR may have failed)")
 
