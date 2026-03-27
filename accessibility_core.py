@@ -13,10 +13,11 @@ from pdfminer.high_level import extract_pages
 from pdfminer.layout import LAParams, LTChar, LTTextBox, LTTextLine
 
 
+STRATEGY_AUTO_FILL = "Auto + first line fill"
 STRATEGY_AUTO = "Auto (font size)"
 STRATEGY_FIRST_LINE = "First line = H1"
 STRATEGY_BOLD = "Bold text = headings"
-STRATEGIES = [STRATEGY_AUTO, STRATEGY_FIRST_LINE, STRATEGY_BOLD]
+STRATEGIES = [STRATEGY_AUTO_FILL, STRATEGY_AUTO, STRATEGY_FIRST_LINE, STRATEGY_BOLD]
 
 
 @dataclass(frozen=True)
@@ -179,13 +180,16 @@ def _detect_bold_headings(
 
 def _normalize_heading_levels(headings: list[Heading]) -> list[Heading]:
     """Ensure headings begin at level 1 (accessibility requirement)."""
-    if not headings or headings[0].level == 1:
+    if not headings:
         return headings
-    shift = headings[0].level - 1
+    min_level = min(h.level for h in headings)
+    if min_level == 1:
+        return headings
+    shift = min_level - 1
     return [
         Heading(
             page=h.page,
-            level=max(1, h.level - shift),
+            level=h.level - shift,
             text=h.text,
             font_size=h.font_size,
             font_name=h.font_name,
@@ -194,41 +198,60 @@ def _normalize_heading_levels(headings: list[Heading]) -> list[Heading]:
     ]
 
 
-def detect_headings(path: Path, strategy: str = STRATEGY_AUTO) -> list[Heading]:
+def _detect_auto_headings(
+    page_lines: dict[int, list[TextLine]],
+) -> list[Heading]:
+    """Auto-detect headings by font size with fallback to bold/first-line."""
+    all_sizes = [line.font_size for lines in page_lines.values() for line in lines]
+    if not all_sizes:
+        return []
+
+    body_size = Counter(all_sizes).most_common(1)[0][0]
+    heading_sizes = sorted(
+        {size for size in all_sizes if size >= body_size * 1.2},
+        reverse=True,
+    )
+    headings: list[Heading] = []
+    if heading_sizes:
+        size_to_level = {
+            size: min(index + 1, 3)
+            for index, size in enumerate(heading_sizes)
+        }
+
+        for page in sorted(page_lines):
+            for line in page_lines[page]:
+                level = size_to_level.get(line.font_size)
+                if level is not None:
+                    headings.append(_heading_from_line(page, level, line))
+
+    if not headings or len(headings) > len(page_lines) * 3:
+        headings = []
+        total_lines = sum(len(lines) for lines in page_lines.values())
+        bold_headings = _detect_bold_headings(page_lines, min_font_size=body_size)
+        if bold_headings and len(bold_headings) <= max(1, total_lines // 2):
+            headings = bold_headings
+        else:
+            headings = _detect_first_line_headings(page_lines)
+
+    return headings
+
+
+def detect_headings(path: Path, strategy: str = STRATEGY_AUTO_FILL) -> list[Heading]:
     """Detect headings across all pages."""
     page_lines = _extract_all_text_lines(path)
     headings: list[Heading] = []
 
-    if strategy == STRATEGY_AUTO:
-        all_sizes = [line.font_size for lines in page_lines.values() for line in lines]
-        if not all_sizes:
-            return []
+    if strategy in (STRATEGY_AUTO, STRATEGY_AUTO_FILL):
+        headings = _detect_auto_headings(page_lines)
 
-        body_size = Counter(all_sizes).most_common(1)[0][0]
-        heading_sizes = sorted(
-            {size for size in all_sizes if size >= body_size * 1.2},
-            reverse=True,
-        )
-        if heading_sizes:
-            size_to_level = {
-                size: min(index + 1, 3)
-                for index, size in enumerate(heading_sizes)
-            }
-
+        if strategy == STRATEGY_AUTO_FILL:
+            pages_with_headings = {h.page for h in headings}
             for page in sorted(page_lines):
-                for line in page_lines[page]:
-                    level = size_to_level.get(line.font_size)
-                    if level is not None:
-                        headings.append(_heading_from_line(page, level, line))
-
-        if not headings or len(headings) > len(page_lines) * 3:
-            headings = []
-            total_lines = sum(len(lines) for lines in page_lines.values())
-            bold_headings = _detect_bold_headings(page_lines, min_font_size=body_size)
-            if bold_headings and len(bold_headings) <= max(1, total_lines // 2):
-                headings = bold_headings
-            else:
-                headings = _detect_first_line_headings(page_lines)
+                if page in pages_with_headings or not page_lines[page]:
+                    continue
+                top_line = max(page_lines[page], key=lambda item: item.y)
+                headings.append(_heading_from_line(page, 2, top_line))
+            headings.sort(key=lambda h: (h.page, h.level))
 
     elif strategy == STRATEGY_FIRST_LINE:
         headings = _detect_first_line_headings(page_lines)
@@ -349,7 +372,7 @@ def inspect_pdf(path: Path) -> PdfInfo:
 def add_tags_if_missing(
     path: Path,
     title: str,
-    strategy: str = STRATEGY_AUTO,
+    strategy: str = STRATEGY_AUTO_FILL,
     headings: list[Heading] | None = None,
 ) -> list[str]:
     """Add MarkInfo, structure tree with real headings, and title."""
@@ -502,7 +525,7 @@ def fix_pdf(
     output_path: Path,
     info: PdfInfo,
     title: str,
-    strategy: str = STRATEGY_AUTO,
+    strategy: str = STRATEGY_AUTO_FILL,
     log_message: Callable[[str], None] | None = None,
 ) -> str:
     headings = detect_headings(input_path, strategy)

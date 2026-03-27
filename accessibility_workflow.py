@@ -9,7 +9,7 @@ from pathlib import Path
 
 from accessibility_core import (
     PdfInfo,
-    STRATEGY_AUTO,
+    STRATEGY_AUTO_FILL,
     detect_headings,
     derive_title,
     fix_pdf,
@@ -238,7 +238,7 @@ def scan_folder(
 def process_pdf_fix(
     input_path: Path,
     info: PdfInfo,
-    strategy: str = STRATEGY_AUTO,
+    strategy: str = STRATEGY_AUTO_FILL,
     *,
     output_dir: Path = OUTPUT_DIR,
 ) -> FixResult:

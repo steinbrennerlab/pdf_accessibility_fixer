@@ -15,7 +15,7 @@ from tkinter import ttk
 
 from accessibility_core import (
     STRATEGIES,
-    STRATEGY_AUTO,
+    STRATEGY_AUTO_FILL,
     Heading,
     PdfInfo,
     add_tags_if_missing,
@@ -104,7 +104,7 @@ class App:
         self.btn_log.pack(side=tk.LEFT, padx=(0, 12))
 
         ttk.Label(btn_frame, text="Heading method:").pack(side=tk.LEFT, padx=(0, 4))
-        self.strategy_var = tk.StringVar(value=STRATEGY_AUTO)
+        self.strategy_var = tk.StringVar(value=STRATEGY_AUTO_FILL)
         self.strategy_combo = ttk.Combobox(
             btn_frame,
             textvariable=self.strategy_var,
@@ -416,7 +416,7 @@ class App:
         if var_strategy in STRATEGIES:
             return var_strategy
 
-        return STRATEGY_AUTO
+        return STRATEGY_AUTO_FILL
 
     def _render_entry(self, entry: FileEntry):
         if entry.iid is None:
