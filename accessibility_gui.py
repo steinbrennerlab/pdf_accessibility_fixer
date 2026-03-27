@@ -66,8 +66,8 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("PDF Accessibility Fixer")
-        self.root.geometry("960x700")
-        self.root.minsize(800, 550)
+        self.root.geometry("1150x750")
+        self.root.minsize(1000, 600)
 
         self._file_data: dict[str, FileEntry] = {}
         self._heading_request_id = 0
@@ -145,21 +145,33 @@ class App:
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.bind("<<TreeviewSelect>>", self._on_file_select)
 
-        heading_frame = ttk.LabelFrame(
-            paned,
-            text="Detected Heading Structure",
-            padding=4,
-        )
-        paned.add(heading_frame, weight=2)
+        detail_paned = ttk.PanedWindow(paned, orient=tk.HORIZONTAL)
+        paned.add(detail_paned, weight=2)
 
-        self.lbl_heading_source = ttk.Label(
-            heading_frame,
-            text="Source:",
-            font=("Segoe UI", 9),
-        )
-        self.lbl_heading_source.pack(fill=tk.X, padx=(0, 0), pady=(0, 4))
+        # --- Left panel: Detected Features ---
+        left_frame = ttk.LabelFrame(detail_paned, text="Detected Features", padding=4)
+        detail_paned.add(left_frame, weight=1)
 
-        heading_tree_frame = ttk.Frame(heading_frame)
+        self.props_text = tk.Text(
+            left_frame,
+            height=5,
+            wrap=tk.WORD,
+            font=("Consolas", 9),
+            state=tk.DISABLED,
+            relief=tk.FLAT,
+            cursor="arrow",
+        )
+        self.props_text.pack(fill=tk.X, padx=0, pady=(0, 4))
+        self.props_text.tag_configure("pass", foreground="#155724")
+        self.props_text.tag_configure("fail", foreground="#721c24")
+        self.props_text.tag_configure("label", foreground="#495057")
+
+        ttk.Separator(left_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=2)
+        ttk.Label(left_frame, text="Heading Structure:", font=("Segoe UI", 9, "bold")).pack(
+            anchor=tk.W, pady=(2, 2)
+        )
+
+        heading_tree_frame = ttk.Frame(left_frame)
         heading_tree_frame.pack(fill=tk.BOTH, expand=True)
 
         h_cols = ("level", "font", "text")
@@ -191,6 +203,25 @@ class App:
         self.h_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         h_vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # --- Right panel: Fix Preview ---
+        right_frame = ttk.LabelFrame(detail_paned, text="Fix Preview", padding=4)
+        detail_paned.add(right_frame, weight=1)
+
+        self.preview_text = tk.Text(
+            right_frame,
+            wrap=tk.WORD,
+            font=("Consolas", 9),
+            state=tk.DISABLED,
+            cursor="arrow",
+        )
+        self.preview_text.pack(fill=tk.BOTH, expand=True)
+        self.preview_text.tag_configure("section", font=("Segoe UI", 10, "bold"), foreground="#004085")
+        self.preview_text.tag_configure("action", foreground="#155724")
+        self.preview_text.tag_configure("skip", foreground="#856404")
+        self.preview_text.tag_configure("heading_item", foreground="#1b1e21")
+        self.preview_text.tag_configure("no_change", foreground="#155724", font=("Segoe UI", 10, "italic"))
+        self.preview_text.tag_configure("error", foreground="#721c24")
+
         self.progress = ttk.Progressbar(self.root, mode="determinate")
         self.progress.pack(fill=tk.X, padx=6, pady=6)
 
@@ -210,10 +241,126 @@ class App:
         self.btn_scan.config(state=state)
         self.btn_fix.config(state=state)
 
+    def _populate_properties(self, entry: FileEntry | None):
+        self.props_text.config(state=tk.NORMAL)
+        self.props_text.delete("1.0", tk.END)
+        if entry is None:
+            self.props_text.config(state=tk.DISABLED)
+            return
+
+        info = entry.info
+        self.props_text.insert(tk.END, f"File: {entry.path}\n", "label")
+        self.props_text.insert(tk.END, f"Pages: {info.page_count}\n", "label")
+
+        tag = "pass" if info.has_text else "fail"
+        label = "Has text" if info.has_text else "Image-only (needs OCR)"
+        self.props_text.insert(tk.END, f"Text: {label}\n", tag)
+
+        tag = "pass" if (info.has_mark_info and info.has_struct_tree and info.has_headings) else "fail"
+        self.props_text.insert(tk.END, f"Tags: {info.tags_summary()}\n", tag)
+
+        tag = "pass" if info.has_good_title else "fail"
+        title_display = info.current_title if info.current_title else "(none)"
+        self.props_text.insert(tk.END, f"Title: {title_display}\n", tag)
+
+        issues = info.issues()
+        if issues:
+            self.props_text.insert(tk.END, f"Issues: {', '.join(issues)}\n", "fail")
+        else:
+            self.props_text.insert(tk.END, "Issues: None\n", "pass")
+
+        self.props_text.config(state=tk.DISABLED)
+
+    def _populate_preview(self, entry: FileEntry | None, headings: list[Heading] | None):
+        self.preview_text.config(state=tk.NORMAL)
+        self.preview_text.delete("1.0", tk.END)
+        if entry is None:
+            self.preview_text.config(state=tk.DISABLED)
+            return
+
+        info = entry.info
+        status = entry.status
+        strategy = self._current_strategy()
+
+        if status in {S_COMPLIANT, S_FIXED}:
+            self.preview_text.insert(tk.END, "No changes needed.\n", "no_change")
+            self.preview_text.insert(tk.END, f"\nStatus: {status}\n", "no_change")
+            self.preview_text.config(state=tk.DISABLED)
+            return
+
+        if status == S_PROCESSING:
+            self.preview_text.insert(tk.END, "Fix in progress...\n", "skip")
+            self.preview_text.config(state=tk.DISABLED)
+            return
+
+        if status == S_ERROR:
+            self.preview_text.insert(tk.END, "Previous attempt failed. Fix Selected will retry:\n\n", "error")
+
+        title = derive_title(entry.name)
+
+        # 1. OCR
+        self.preview_text.insert(tk.END, "1. OCR\n", "section")
+        ocr_mode = requested_ocr_mode(info)
+        if ocr_mode == "redo-ocr":
+            self.preview_text.insert(tk.END, "   Re-run OCR (text exists)\n", "action")
+        else:
+            self.preview_text.insert(tk.END, "   Full OCR (image-only pages)\n", "action")
+        self.preview_text.insert(tk.END, "   Output: PDF/A-2 format\n\n", "action")
+
+        # 2. Structure tags
+        self.preview_text.insert(tk.END, "2. Structure Tags\n", "section")
+        if not info.has_mark_info:
+            self.preview_text.insert(tk.END, "   Add /MarkInfo{Marked:true}\n", "action")
+        else:
+            self.preview_text.insert(tk.END, "   /MarkInfo already present\n", "skip")
+
+        needs_struct = not info.has_struct_tree or not info.has_headings
+        if needs_struct:
+            self.preview_text.insert(tk.END, f"   Build StructTreeRoot ({strategy})\n", "action")
+            if headings is not None:
+                count = len(headings)
+                noun = "heading" if count == 1 else "headings"
+                self.preview_text.insert(tk.END, f"   {count} {noun} detected:\n", "action")
+                for h in headings[:8]:
+                    self.preview_text.insert(
+                        tk.END,
+                        f"     H{h.level} p{h.page + 1}: {h.text[:50]}\n",
+                        "heading_item",
+                    )
+                if len(headings) > 8:
+                    self.preview_text.insert(
+                        tk.END,
+                        f"     ... and {len(headings) - 8} more\n",
+                        "heading_item",
+                    )
+            else:
+                self.preview_text.insert(tk.END, "   (detecting headings...)\n", "skip")
+        else:
+            self.preview_text.insert(tk.END, "   StructTreeRoot with headings present\n", "skip")
+
+        self.preview_text.insert(tk.END, "\n", "")
+
+        # 3. Title
+        self.preview_text.insert(tk.END, "3. Title\n", "section")
+        if not info.has_good_title:
+            self.preview_text.insert(tk.END, f'   Set to: "{title}"\n', "action")
+        else:
+            self.preview_text.insert(tk.END, f'   Current: "{info.current_title}"\n', "skip")
+            self.preview_text.insert(tk.END, f'   Update to: "{title}"\n', "action")
+
+        self.preview_text.insert(tk.END, "\n", "")
+
+        # 4. Output
+        self.preview_text.insert(tk.END, "4. Output\n", "section")
+        self.preview_text.insert(tk.END, f"   Save to: updated/{entry.name}\n", "action")
+
+        self.preview_text.config(state=tk.DISABLED)
+
     def _invalidate_heading_view(self):
         self._heading_request_id += 1
-        self._set_heading_source(None)
         self._clear_tree(self.h_tree)
+        self._populate_properties(None)
+        self._populate_preview(None, None)
 
     def _show_heading_status(self, label: str, message: str = "", tag: str = "status"):
         self._clear_tree(self.h_tree)
@@ -224,12 +371,6 @@ class App:
             values=("", "", message),
             tags=(tag,),
         )
-
-    def _set_heading_source(self, path: Path | None):
-        text = "Source:"
-        if path is not None:
-            text = f"Source: {path}"
-        self.lbl_heading_source.config(text=text)
 
     def _selected_filename(self) -> str | None:
         selection = self.tree.selection()
@@ -284,7 +425,9 @@ class App:
             self._invalidate_heading_view()
             return
 
-        self._set_heading_source(entry.path)
+        self._populate_properties(entry)
+        self._populate_preview(entry, None)
+
         strategy = self._current_strategy()
         self._heading_request_id += 1
         request_id = self._heading_request_id
@@ -293,7 +436,7 @@ class App:
         def detect():
             try:
                 headings = detect_headings(entry.path, strategy)
-                self._queue(self._populate_heading_tree, request_id, entry.name, headings)
+                self._queue(self._on_headings_ready, request_id, entry.name, headings)
             except Exception as exc:
                 self._queue(
                     self._show_detail_error,
@@ -304,7 +447,7 @@ class App:
 
         self._start_thread(detect)
 
-    def _populate_heading_tree(self, request_id: int, filename: str, headings: list[Heading]):
+    def _on_headings_ready(self, request_id: int, filename: str, headings: list[Heading]):
         if request_id != self._heading_request_id:
             return
         if filename != self._selected_filename():
@@ -315,22 +458,25 @@ class App:
                 "No headings detected",
                 f"{self._current_strategy()} found no heading candidates",
             )
-            return
+        else:
+            self._clear_tree(self.h_tree)
+            for heading in headings:
+                tag = f"h{min(heading.level, 3)}"
+                self.h_tree.insert(
+                    "",
+                    tk.END,
+                    text=f"Page {heading.page + 1}",
+                    values=(
+                        f"H{heading.level}",
+                        f"{heading.font_size}pt {heading.font_name}",
+                        heading.text,
+                    ),
+                    tags=(tag,),
+                )
 
-        self._clear_tree(self.h_tree)
-        for heading in headings:
-            tag = f"h{min(heading.level, 3)}"
-            self.h_tree.insert(
-                "",
-                tk.END,
-                text=f"Page {heading.page + 1}",
-                values=(
-                    f"H{heading.level}",
-                    f"{heading.font_size}pt {heading.font_name}",
-                    heading.text,
-                ),
-                tags=(tag,),
-            )
+        entry = self._selected_entry()
+        if entry is not None:
+            self._populate_preview(entry, headings)
 
     def _show_detail_error(self, request_id: int, filename: str, message: str):
         if request_id != self._heading_request_id:
@@ -339,6 +485,9 @@ class App:
             return
 
         self._show_heading_status("Error", message, "error")
+        entry = self._selected_entry()
+        if entry is not None:
+            self._populate_preview(entry, [])
 
     def scan(self):
         if self._processing:
