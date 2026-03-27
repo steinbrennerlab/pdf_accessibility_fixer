@@ -18,9 +18,12 @@ from accessibility_core import (
     STRATEGY_AUTO,
     Heading,
     PdfInfo,
+    add_tags_if_missing,
     derive_title,
     detect_headings,
+    inspect_pdf,
     read_structure_headings,
+    verify_output,
 )
 from accessibility_workflow import (
     LOG_FILE,
@@ -91,6 +94,11 @@ class App:
             command=self._start_fix_selected,
         )
         self.btn_fix.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.btn_redo_headings = ttk.Button(
+            btn_frame, text="Redo Headings", command=self._start_redo_headings,
+        )
+        self.btn_redo_headings.pack(side=tk.LEFT, padx=(0, 4))
 
         self.btn_log = ttk.Button(btn_frame, text="Open Log", command=self._open_log)
         self.btn_log.pack(side=tk.LEFT, padx=(0, 12))
@@ -243,6 +251,7 @@ class App:
         state = tk.DISABLED if is_processing else tk.NORMAL
         self.btn_scan.config(state=state)
         self.btn_fix.config(state=state)
+        self.btn_redo_headings.config(state=state)
 
     def _populate_properties(self, entry: FileEntry | None):
         self.props_text.config(state=tk.NORMAL)
@@ -676,6 +685,56 @@ class App:
             )
         )
         self._set_processing(False)
+
+    def _start_redo_headings(self):
+        if self._processing:
+            return
+
+        entry = self._selected_entry()
+        if entry is None or entry.status not in {S_FIXED, S_ERROR}:
+            return
+        if not entry.path.exists():
+            return
+
+        self._set_processing(True)
+        strategy = self._current_strategy()
+        log_section("REDO HEADINGS")
+        log(f"File: {entry.name}")
+        log(f"Heading strategy: {strategy}")
+
+        self._queue(self._update_entry, entry.name, S_PROCESSING, "Redoing headings...", None, None)
+        self._start_thread(self._redo_headings_worker, entry, strategy)
+
+    def _redo_headings_worker(self, entry: FileEntry, strategy: str):
+        title = derive_title(entry.name)
+        started = time.time()
+        try:
+            headings = detect_headings(entry.source_path, strategy)
+            log(f"    Detected {len(headings)} headings from source")
+            changes = add_tags_if_missing(entry.path, title, strategy, headings=headings)
+            for change in changes:
+                log(f"    {change}")
+
+            errors = verify_output(entry.path, title)
+            elapsed = time.time() - started
+            if errors:
+                detail = f"Verify failed: {'; '.join(errors)}"
+                log(f"    VERIFY FAILED: {detail}")
+                self._queue(self._update_entry, entry.name, S_ERROR, detail, None, None)
+            else:
+                info = inspect_pdf(entry.path)
+                detail = f"Headings redone in {elapsed:.1f}s ({strategy})"
+                log(f"    VERIFY OK in {elapsed:.1f}s")
+                self._queue(self._update_entry, entry.name, S_FIXED, detail, info, None)
+        except Exception as exc:
+            log(f"    ERROR: {exc}")
+            log(f"    TRACEBACK:\n{traceback.format_exc()}")
+            self._queue(
+                self._update_entry, entry.name, S_ERROR,
+                f"{type(exc).__name__}: {exc}"[:240], None, None,
+            )
+
+        self._queue(self._set_processing, False)
 
     def _open_log(self):
         if not LOG_FILE.exists():
