@@ -505,6 +505,8 @@ def fix_pdf(
 ) -> str:
     headings = detect_headings(input_path, strategy)
     mode = _run_ocr(input_path, output_path, title, info.has_text, log_message)
+    if not headings:
+        headings = detect_headings(output_path, strategy)
     add_tags_if_missing(output_path, title, strategy, headings=headings)
     return mode
 

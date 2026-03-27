@@ -710,7 +710,11 @@ class App:
         started = time.time()
         try:
             headings = detect_headings(entry.source_path, strategy)
-            log(f"    Detected {len(headings)} headings from source")
+            if not headings:
+                headings = detect_headings(entry.path, strategy)
+                log(f"    Detected {len(headings)} headings from output (source had none)")
+            else:
+                log(f"    Detected {len(headings)} headings from source")
             changes = add_tags_if_missing(entry.path, title, strategy, headings=headings)
             for change in changes:
                 log(f"    {change}")
