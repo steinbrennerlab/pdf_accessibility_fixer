@@ -172,6 +172,7 @@ class App:
         self.h_tree.tag_configure("h1", background="#d1ecf1")
         self.h_tree.tag_configure("h2", background="#e2e3e5")
         self.h_tree.tag_configure("h3", background="#f8f9fa")
+        self.h_tree.tag_configure("status", foreground="#495057", background="#f8f9fa")
         self.h_tree.tag_configure("error", foreground="#721c24", background="#f8d7da")
 
         h_vsb = ttk.Scrollbar(heading_frame, orient=tk.VERTICAL, command=self.h_tree.yview)
@@ -201,6 +202,16 @@ class App:
     def _invalidate_heading_view(self):
         self._heading_request_id += 1
         self._clear_tree(self.h_tree)
+
+    def _show_heading_status(self, label: str, message: str = "", tag: str = "status"):
+        self._clear_tree(self.h_tree)
+        self.h_tree.insert(
+            "",
+            tk.END,
+            text=label,
+            values=("", "", message),
+            tags=(tag,),
+        )
 
     def _selected_filename(self) -> str | None:
         selection = self.tree.selection()
@@ -243,6 +254,7 @@ class App:
         strategy = self.strategy_var.get()
         self._heading_request_id += 1
         request_id = self._heading_request_id
+        self._show_heading_status("Detecting...", f"Running {strategy}")
 
         def detect():
             try:
@@ -262,6 +274,13 @@ class App:
         if request_id != self._heading_request_id:
             return
         if filename != self._selected_filename():
+            return
+
+        if not headings:
+            self._show_heading_status(
+                "No headings detected",
+                f"{self.strategy_var.get()} found no heading candidates",
+            )
             return
 
         self._clear_tree(self.h_tree)
@@ -285,14 +304,7 @@ class App:
         if filename != self._selected_filename():
             return
 
-        self._clear_tree(self.h_tree)
-        self.h_tree.insert(
-            "",
-            tk.END,
-            text="Error",
-            values=("", "", message),
-            tags=("error",),
-        )
+        self._show_heading_status("Error", message, "error")
 
     def scan(self):
         if self._processing:
