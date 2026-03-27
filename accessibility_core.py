@@ -138,6 +138,45 @@ def _heading_from_line(page: int, level: int, line: TextLine) -> Heading:
     )
 
 
+def _detect_first_line_headings(page_lines: dict[int, list[TextLine]]) -> list[Heading]:
+    headings: list[Heading] = []
+    for page in sorted(page_lines):
+        lines = page_lines[page]
+        if not lines:
+            continue
+        top_line = max(lines, key=lambda item: item.y)
+        level = 1 if page == 0 else 2
+        headings.append(_heading_from_line(page, level, top_line))
+    return headings
+
+
+def _detect_bold_headings(
+    page_lines: dict[int, list[TextLine]],
+    *,
+    min_font_size: float | None = None,
+) -> list[Heading]:
+    headings: list[Heading] = []
+    for page in sorted(page_lines):
+        for line in page_lines[page]:
+            if not line.is_bold:
+                continue
+            if min_font_size is not None and line.font_size < min_font_size:
+                continue
+            headings.append(_heading_from_line(page, 2, line))
+
+    if headings:
+        first = headings[0]
+        headings[0] = Heading(
+            page=first.page,
+            level=1,
+            text=first.text,
+            font_size=first.font_size,
+            font_name=first.font_name,
+        )
+
+    return headings
+
+
 def detect_headings(path: Path, strategy: str = STRATEGY_AUTO) -> list[Heading]:
     """Detect headings across all pages."""
     page_lines = _extract_all_text_lines(path)
@@ -153,40 +192,32 @@ def detect_headings(path: Path, strategy: str = STRATEGY_AUTO) -> list[Heading]:
             {size for size in all_sizes if size >= body_size * 1.2},
             reverse=True,
         )
-        size_to_level = {
-            size: min(index + 1, 3)
-            for index, size in enumerate(heading_sizes)
-        }
+        if heading_sizes:
+            size_to_level = {
+                size: min(index + 1, 3)
+                for index, size in enumerate(heading_sizes)
+            }
 
-        for page in sorted(page_lines):
-            for line in page_lines[page]:
-                level = size_to_level.get(line.font_size)
-                if level is not None:
-                    headings.append(_heading_from_line(page, level, line))
+            for page in sorted(page_lines):
+                for line in page_lines[page]:
+                    level = size_to_level.get(line.font_size)
+                    if level is not None:
+                        headings.append(_heading_from_line(page, level, line))
+
+            return headings
+
+        total_lines = sum(len(lines) for lines in page_lines.values())
+        bold_headings = _detect_bold_headings(page_lines, min_font_size=body_size)
+        if bold_headings and len(bold_headings) <= max(1, total_lines // 2):
+            return bold_headings
+
+        return _detect_first_line_headings(page_lines)
 
     elif strategy == STRATEGY_FIRST_LINE:
-        for page in sorted(page_lines):
-            lines = page_lines[page]
-            if not lines:
-                continue
-            top_line = max(lines, key=lambda item: item.y)
-            level = 1 if page == 0 else 2
-            headings.append(_heading_from_line(page, level, top_line))
+        return _detect_first_line_headings(page_lines)
 
     elif strategy == STRATEGY_BOLD:
-        for page in sorted(page_lines):
-            for line in page_lines[page]:
-                if line.is_bold:
-                    headings.append(_heading_from_line(page, 2, line))
-        if headings:
-            first = headings[0]
-            headings[0] = Heading(
-                page=first.page,
-                level=1,
-                text=first.text,
-                font_size=first.font_size,
-                font_name=first.font_name,
-            )
+        return _detect_bold_headings(page_lines)
 
     return headings
 

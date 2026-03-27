@@ -104,19 +104,42 @@ class ScanFolderTests(unittest.TestCase):
         self.assertEqual(summary.needs_fix, 1)
 
 
+class DescribeFixErrorsTests(unittest.TestCase):
+    def test_describe_fix_errors_explains_missing_heading_candidates(self):
+        with patch.object(flow, "detect_headings", return_value=[]):
+            detail = flow.describe_fix_errors(
+                Path("sample.pdf"),
+                core.STRATEGY_AUTO,
+                ["Missing headings with /ActualText"],
+            )
+
+        self.assertEqual(
+            detail,
+            "Verification failed: Missing headings with /ActualText | "
+            "Auto (font size) found no heading candidates",
+        )
+
+
 class ProcessPdfFixTests(unittest.TestCase):
     def test_process_pdf_fix_returns_verification_errors(self):
         info = core.PdfInfo(False, False, False, False, "", True, 4)
         source = Path("sample.pdf")
 
         with patch.object(flow, "fix_pdf", return_value="redo-ocr"), patch.object(
-            flow, "verify_output", return_value=["Missing /MarkInfo"]
+            flow, "verify_output", return_value=["Missing headings with /ActualText"]
+        ), patch.object(
+            flow, "describe_fix_errors",
+            return_value="Verification failed: Missing headings with /ActualText",
         ):
             result = flow.process_pdf_fix(source, info)
 
         self.assertEqual(result.title, "sample")
         self.assertEqual(result.mode, "redo-ocr")
-        self.assertEqual(result.errors, ("Missing /MarkInfo",))
+        self.assertEqual(result.errors, ("Missing headings with /ActualText",))
+        self.assertEqual(
+            result.error_detail,
+            "Verification failed: Missing headings with /ActualText",
+        )
         self.assertIsNone(result.info)
 
     def test_process_pdf_fix_returns_output_info_on_success(self):
@@ -132,6 +155,7 @@ class ProcessPdfFixTests(unittest.TestCase):
         self.assertEqual(result.errors, ())
         self.assertEqual(result.info, output_info)
         self.assertEqual(result.output_path, flow.OUTPUT_DIR / source.name)
+        self.assertIsNone(result.error_detail)
 
 
 if __name__ == "__main__":

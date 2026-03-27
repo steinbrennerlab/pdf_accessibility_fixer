@@ -69,5 +69,28 @@ class FixPdfTests(unittest.TestCase):
         )
 
 
+class DetectHeadingsTests(unittest.TestCase):
+    def test_auto_falls_back_to_bold_candidates_when_font_sizes_do_not_separate(self):
+        page_lines = {
+            0: [
+                core.TextLine("Course Title", "Arial-Bold", 10.0, 700, True),
+                core.TextLine("Body text", "Arial", 10.0, 680, False),
+                core.TextLine("Section Header", "Arial-Bold", 11.0, 660, True),
+                core.TextLine("Glossary Term", "Arial-Bold", 9.0, 640, True),
+            ]
+        }
+
+        with patch.object(core, "_extract_all_text_lines", return_value=page_lines):
+            headings = core.detect_headings(Path("sample.pdf"), core.STRATEGY_AUTO)
+
+        self.assertEqual(
+            headings,
+            [
+                core.Heading(0, 1, "Course Title", 10.0, "Arial-Bold"),
+                core.Heading(0, 2, "Section Header", 11.0, "Arial-Bold"),
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

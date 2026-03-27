@@ -396,7 +396,7 @@ class App:
                 log(f"    Completed in {elapsed:.1f}s (mode={result.mode})")
 
                 if result.errors:
-                    detail = "; ".join(result.errors)
+                    detail = result.error_detail or "; ".join(result.errors)
                     log(f"    VERIFY FAILED: {detail}")
                     self._queue(self._update_entry, entry.name, S_ERROR, detail, None, None)
                     errors += 1
@@ -421,7 +421,7 @@ class App:
                     self._update_entry,
                     entry.name,
                     S_ERROR,
-                    str(exc)[:120],
+                    f"{type(exc).__name__}: {exc}"[:240],
                     None,
                     None,
                 )

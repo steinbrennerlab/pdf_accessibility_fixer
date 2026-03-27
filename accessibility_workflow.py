@@ -10,6 +10,7 @@ from pathlib import Path
 from accessibility_core import (
     PdfInfo,
     STRATEGY_AUTO,
+    detect_headings,
     derive_title,
     fix_pdf,
     inspect_pdf,
@@ -75,6 +76,7 @@ class FixResult:
     mode: str
     errors: tuple[str, ...] = ()
     info: PdfInfo | None = None
+    error_detail: str | None = None
 
 
 def row_tag_for_status(status: str) -> str:
@@ -83,6 +85,30 @@ def row_tag_for_status(status: str) -> str:
 
 def requested_ocr_mode(info: PdfInfo) -> str:
     return "redo-ocr" if info.has_text else "force-ocr"
+
+
+def describe_fix_errors(
+    input_path: Path,
+    strategy: str,
+    errors: Sequence[str],
+) -> str:
+    if not errors:
+        return ""
+
+    parts = [f"Verification failed: {'; '.join(errors)}"]
+    if "Missing headings with /ActualText" in errors:
+        try:
+            heading_count = len(detect_headings(input_path, strategy))
+        except Exception:
+            heading_count = None
+
+        if heading_count == 0:
+            parts.append(f"{strategy} found no heading candidates")
+        elif heading_count is not None:
+            label = "candidate" if heading_count == 1 else "candidates"
+            parts.append(f"{strategy} found {heading_count} heading {label}")
+
+    return " | ".join(parts)
 
 
 def log(msg: str) -> None:
@@ -229,7 +255,13 @@ def process_pdf_fix(
     )
     errors = tuple(verify_output(output_path, title))
     if errors:
-        return FixResult(title=title, output_path=output_path, mode=mode, errors=errors)
+        return FixResult(
+            title=title,
+            output_path=output_path,
+            mode=mode,
+            errors=errors,
+            error_detail=describe_fix_errors(input_path, strategy, errors),
+        )
     return FixResult(
         title=title,
         output_path=output_path,
