@@ -90,6 +90,7 @@ class HeadingViewTests(unittest.TestCase):
         entry = gui.FileEntry(
             name="sample.pdf",
             path=Path("sample.pdf"),
+            source_path=Path("sample.pdf"),
             info=core.PdfInfo(True, True, True, True, "sample", True, 1),
             status="Fixed",
             detail="ok",
@@ -112,6 +113,7 @@ class HeadingViewTests(unittest.TestCase):
         entry = gui.FileEntry(
             name="sample.pdf",
             path=Path("sample.pdf"),
+            source_path=Path("sample.pdf"),
             info=core.PdfInfo(True, True, True, True, "sample", True, 1),
             status="Needs Fix",
             detail="issues",
@@ -135,6 +137,7 @@ class HeadingViewTests(unittest.TestCase):
         entry = gui.FileEntry(
             name="sample.pdf",
             path=Path("sample.pdf"),
+            source_path=Path("sample.pdf"),
             info=core.PdfInfo(True, False, False, False, "", True, 1),
             status=gui.S_ERROR,
             detail="Verification failed",

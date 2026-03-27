@@ -44,6 +44,7 @@ from accessibility_workflow import (
 class FileEntry:
     name: str
     path: Path
+    source_path: Path
     info: PdfInfo
     status: str
     detail: str
@@ -435,7 +436,7 @@ class App:
 
         def detect():
             try:
-                headings = detect_headings(entry.path, strategy)
+                headings = detect_headings(entry.source_path, strategy)
                 self._queue(self._on_headings_ready, request_id, entry.name, headings)
             except Exception as exc:
                 self._queue(
@@ -520,6 +521,7 @@ class App:
         entry = FileEntry(
             name=result.filename,
             path=result.display_path,
+            source_path=result.source_path,
             info=result.info,
             status=result.status,
             detail=result.detail,

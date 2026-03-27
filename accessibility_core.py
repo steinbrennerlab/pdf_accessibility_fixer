@@ -301,6 +301,7 @@ def add_tags_if_missing(
     path: Path,
     title: str,
     strategy: str = STRATEGY_AUTO,
+    headings: list[Heading] | None = None,
 ) -> list[str]:
     """Add MarkInfo, structure tree with real headings, and title."""
     changes: list[str] = []
@@ -313,7 +314,8 @@ def add_tags_if_missing(
 
         needs_struct = _struct_tree_is_empty(root) or not _has_heading_with_text(root)
         if needs_struct:
-            headings = detect_headings(path, strategy)
+            if headings is None:
+                headings = detect_headings(path, strategy)
             headings_by_page: dict[int, list[Heading]] = {}
             for heading in headings:
                 headings_by_page.setdefault(heading.page, []).append(heading)
@@ -454,8 +456,9 @@ def fix_pdf(
     strategy: str = STRATEGY_AUTO,
     log_message: Callable[[str], None] | None = None,
 ) -> str:
+    headings = detect_headings(input_path, strategy)
     mode = _run_ocr(input_path, output_path, title, info.has_text, log_message)
-    add_tags_if_missing(output_path, title, strategy)
+    add_tags_if_missing(output_path, title, strategy, headings=headings)
     return mode
 
 
