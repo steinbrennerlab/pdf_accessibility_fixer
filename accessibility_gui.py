@@ -103,6 +103,7 @@ class App:
             width=20,
         )
         self.strategy_combo.pack(side=tk.LEFT, padx=(0, 4))
+        self.strategy_combo.bind("<<ComboboxSelected>>", self._on_strategy_change)
 
         self.lbl_summary = ttk.Label(btn_frame, text="", font=("Segoe UI", 9))
         self.lbl_summary.pack(side=tk.RIGHT)
@@ -151,9 +152,19 @@ class App:
         )
         paned.add(heading_frame, weight=2)
 
+        self.lbl_heading_source = ttk.Label(
+            heading_frame,
+            text="Source:",
+            font=("Segoe UI", 9),
+        )
+        self.lbl_heading_source.pack(fill=tk.X, padx=(0, 0), pady=(0, 4))
+
+        heading_tree_frame = ttk.Frame(heading_frame)
+        heading_tree_frame.pack(fill=tk.BOTH, expand=True)
+
         h_cols = ("level", "font", "text")
         self.h_tree = ttk.Treeview(
-            heading_frame,
+            heading_tree_frame,
             columns=h_cols,
             show="tree headings",
             selectmode="none",
@@ -175,7 +186,7 @@ class App:
         self.h_tree.tag_configure("status", foreground="#495057", background="#f8f9fa")
         self.h_tree.tag_configure("error", foreground="#721c24", background="#f8d7da")
 
-        h_vsb = ttk.Scrollbar(heading_frame, orient=tk.VERTICAL, command=self.h_tree.yview)
+        h_vsb = ttk.Scrollbar(heading_tree_frame, orient=tk.VERTICAL, command=self.h_tree.yview)
         self.h_tree.configure(yscrollcommand=h_vsb.set)
         self.h_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         h_vsb.pack(side=tk.RIGHT, fill=tk.Y)
@@ -201,6 +212,7 @@ class App:
 
     def _invalidate_heading_view(self):
         self._heading_request_id += 1
+        self._set_heading_source(None)
         self._clear_tree(self.h_tree)
 
     def _show_heading_status(self, label: str, message: str = "", tag: str = "status"):
@@ -212,6 +224,12 @@ class App:
             values=("", "", message),
             tags=(tag,),
         )
+
+    def _set_heading_source(self, path: Path | None):
+        text = "Source:"
+        if path is not None:
+            text = f"Source: {path}"
+        self.lbl_heading_source.config(text=text)
 
     def _selected_filename(self) -> str | None:
         selection = self.tree.selection()
@@ -225,6 +243,17 @@ class App:
         if not filename:
             return None
         return self._file_data.get(filename)
+
+    def _current_strategy(self) -> str:
+        combo_strategy = self.strategy_combo.get().strip()
+        if combo_strategy in STRATEGIES:
+            return combo_strategy
+
+        var_strategy = self.strategy_var.get().strip()
+        if var_strategy in STRATEGIES:
+            return var_strategy
+
+        return STRATEGY_AUTO
 
     def _render_entry(self, entry: FileEntry):
         if entry.iid is None:
@@ -245,13 +274,18 @@ class App:
     def _on_file_select(self, _event=None):
         self._refresh_heading_view()
 
+    def _on_strategy_change(self, _event=None):
+        if self._selected_entry() is not None:
+            self._refresh_heading_view()
+
     def _refresh_heading_view(self):
         entry = self._selected_entry()
         if entry is None:
             self._invalidate_heading_view()
             return
 
-        strategy = self.strategy_var.get()
+        self._set_heading_source(entry.path)
+        strategy = self._current_strategy()
         self._heading_request_id += 1
         request_id = self._heading_request_id
         self._show_heading_status("Detecting...", f"Running {strategy}")
@@ -279,7 +313,7 @@ class App:
         if not headings:
             self._show_heading_status(
                 "No headings detected",
-                f"{self.strategy_var.get()} found no heading candidates",
+                f"{self._current_strategy()} found no heading candidates",
             )
             return
 
@@ -373,14 +407,14 @@ class App:
             return
 
         entry = self._selected_entry()
-        if entry is None or entry.status != S_NEEDS_FIX:
+        if entry is None or entry.status not in {S_NEEDS_FIX, S_ERROR}:
             return
 
         self._set_processing(True)
         self.progress["maximum"] = 1
         self.progress["value"] = 0
 
-        strategy = self.strategy_var.get()
+        strategy = self._current_strategy()
         log_section("FIX SESSION STARTED")
         log(f"File: {entry.name}")
         log(f"Heading strategy: {strategy}")

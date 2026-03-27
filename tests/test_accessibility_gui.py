@@ -36,11 +36,32 @@ class FakeVar:
         return self.value
 
 
+class FakeLabel:
+    def __init__(self):
+        self.text = ""
+
+    def config(self, *, text: str):
+        self.text = text
+
+
+class FakeCombo:
+    def __init__(self, value: str):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def bind(self, *_args, **_kwargs):
+        return None
+
+
 class HeadingViewTests(unittest.TestCase):
     def _make_app(self):
         app = object.__new__(gui.App)
         app.h_tree = FakeTree()
+        app.lbl_heading_source = FakeLabel()
         app.strategy_var = FakeVar(core.STRATEGY_AUTO)
+        app.strategy_combo = FakeCombo(core.STRATEGY_AUTO)
         app._heading_request_id = 0
         return app
 
@@ -57,6 +78,7 @@ class HeadingViewTests(unittest.TestCase):
 
         app._refresh_heading_view()
 
+        self.assertEqual(app.lbl_heading_source.text, "Source: sample.pdf")
         self.assertEqual(len(app.h_tree.rows), 1)
         self.assertEqual(app.h_tree.rows[0]["text"], "Detecting...")
         self.assertEqual(
@@ -77,6 +99,35 @@ class HeadingViewTests(unittest.TestCase):
             app.h_tree.rows[0]["values"],
             ("", "", f"{core.STRATEGY_AUTO} found no heading candidates"),
         )
+
+    def test_start_fix_selected_uses_combo_strategy_and_allows_retry_from_error(self):
+        app = self._make_app()
+        app.strategy_combo = FakeCombo(core.STRATEGY_BOLD)
+        entry = gui.FileEntry(
+            name="sample.pdf",
+            path=Path("sample.pdf"),
+            info=core.PdfInfo(True, False, False, False, "", True, 1),
+            status=gui.S_ERROR,
+            detail="Verification failed",
+        )
+        app._processing = False
+        app.progress = {}
+        app._selected_entry = lambda: entry
+        app._set_processing = lambda is_processing: setattr(app, "_processing", is_processing)
+
+        started = {}
+        worker = object()
+        app._fix_worker = worker
+        app._start_thread = lambda target, *args: started.update(target=target, args=args)
+
+        with unittest.mock.patch.object(gui, "log_section"), unittest.mock.patch.object(gui, "log"):
+            app._start_fix_selected()
+
+        self.assertTrue(app._processing)
+        self.assertEqual(started["target"], worker)
+        self.assertEqual(started["args"], ([entry], core.STRATEGY_BOLD))
+        self.assertEqual(app.progress["maximum"], 1)
+        self.assertEqual(app.progress["value"], 0)
 
 
 if __name__ == "__main__":
