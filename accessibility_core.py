@@ -220,7 +220,9 @@ def detect_headings(path: Path, strategy: str = STRATEGY_AUTO) -> list[Heading]:
                     level = size_to_level.get(line.font_size)
                     if level is not None:
                         headings.append(_heading_from_line(page, level, line))
-        else:
+
+        if not headings or len(headings) > len(page_lines) * 3:
+            headings = []
             total_lines = sum(len(lines) for lines in page_lines.values())
             bold_headings = _detect_bold_headings(page_lines, min_font_size=body_size)
             if bold_headings and len(bold_headings) <= max(1, total_lines // 2):
