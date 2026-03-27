@@ -24,7 +24,7 @@ The GUI shows a color-coded table of all PDFs in the folder:
 - **Blue** — currently processing
 - **Red** — error during processing
 
-Click **Fix All** to process all pending files. Fixed PDFs are saved to the `updated/` subfolder.
+Click **Fix Selected** to process the selected pending file. Fixed PDFs are saved to the `updated/` subfolder.
 
 ## Setup
 
@@ -54,13 +54,13 @@ micromamba run -n myenv python fix_pdf_accessibility.py
 
 1. The GUI opens and automatically scans the current folder for PDFs
 2. Each PDF is inspected and shown in the table with its accessibility status
-3. Click **Fix All** to process all files that need fixing
+3. Select a row and click **Fix Selected** to process that file
 4. Fixed PDFs appear in the `updated/` subfolder
 5. Click **Open Log** to view the detailed processing log
 
 ### Known-good files
 
-Files listed in the `KNOWN_GOOD` set at the top of the script are always shown as compliant and skipped during processing. Edit this set to add files you've already verified externally:
+Files listed in the `KNOWN_GOOD` set in `accessibility_workflow.py` are always shown as compliant and skipped during processing. Edit this set to add files you've already verified externally:
 
 ```python
 KNOWN_GOOD = {"Wk1_Janeway_Ch1_Sec1-5.pdf"}
